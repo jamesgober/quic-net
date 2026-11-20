@@ -13,6 +13,33 @@
 
 ---
 
+## [0.3.0] - 2026-11-20
+
+Packet protection: everything RFC 9001 section 5 asks of the transport,
+over key traits a TLS session implements.
+
+### Added
+
+- `PacketKey` and `HeaderKey`: the AEAD and header protection keys of one
+  direction and level, implemented by whatever provides the ciphers.
+- `seal_packet`, `remove_header_protection`, `open_payload`: protecting and
+  opening a packet in place around the wire layer's headers. Opening takes
+  two steps so the key phase can pick the key; the reserved bits are
+  checked only after the payload authenticates.
+- `InitialSecrets`, `Secret`, `KeyMaterial`: the Initial key schedule, key
+  material for 16- and 32-byte keys, and the next secret of a key update.
+  Secrets and key material are zeroed on drop.
+- `AeadLimits` and `AeadUsage`: the confidentiality and integrity limits of
+  RFC 9001 section 6.6.
+- `retry_tag`, `verify_retry`, `RetryIntegrity`: the Retry integrity tag,
+  checked in constant time.
+- The RFC 9001 appendix A vectors as tests, byte for byte; a `protection`
+  fuzz target; protection costs in `benches/codec.rs`.
+
+### Changed
+
+- crypt-io's `mac-hmac` feature, for HKDF in the Initial key schedule.
+
 ## [0.2.0] - 2026-11-20
 
 The wire layer: everything on the wire that needs no keys.

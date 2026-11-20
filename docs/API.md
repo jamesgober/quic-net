@@ -1,6 +1,6 @@
 # quic-net - API Reference
 
-> Every public item of `quic-net` `0.2.0`: the wire layer. The rustdoc on docs.rs has the full signatures.
+> Every public item of `quic-net` `0.3.0`: the wire layer and packet protection. The rustdoc on docs.rs has the full signatures.
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
@@ -11,6 +11,7 @@
 - [Frames](#frames): `Frame`, `frames`, `Frames`, `PacketKind`, `Ack`, `AckRanges`, `EcnCounts`, `MAX_ACK_RANGES`, `MAX_STREAMS`
 - [Transport parameters](#transport-parameters): `TransportParameters`, `PreferredAddress`, `Side`, `MAX_PARAMETERS`
 - [Connection IDs](#connection-ids): `ConnectionId`, `CidError`, `MAX_CID_LEN`, `PeerCids`, `PeerCid`, `LocalCids`, `ResetKey`, `ResetToken`, `is_stateless_reset`, `MIN_STATELESS_RESET`
+- [Packet protection](#packet-protection): `PacketKey`, `HeaderKey`, `seal_packet`, `remove_header_protection`, `open_payload`, `Unprotected`, `ProtectError`, `CryptoError`, `nonce`, `AeadLimits`, `AeadUsage`, `Secret`, `KeyMaterial`, `InitialSecrets`, `RetryIntegrity`, `retry_tag`, `verify_retry`, `TAG_LEN`, `SAMPLE_LEN`, `INITIAL_SALT_V1`, `RETRY_KEY_V1`, `RETRY_NONCE_V1`
 - [Errors](#errors): `DecodeError`, `TransportErrorCode`
 - [`VERSION`](#version)
 
@@ -69,6 +70,30 @@ assert_eq!(ack.ranges().collect::<Vec<_>>(), vec![10..=20, 0..=5]);
 `ConnectionId::new(&[u8])` (0 to 20 bytes). `PeerCids::new(initial, our_limit)` keeps the peer's IDs: `on_new_connection_id(sequence, retire_prior_to, cid, token) -> Result<Vec<u64>, TransportErrorCode>` returns the sequence numbers to retire. `LocalCids::new(initial)` keeps ours: `issue(cid, &key)` (within the peer's limit), `on_retire(sequence, packet_dcid)`.
 
 `ResetKey::new([u8; 32]).token(&cid)` derives a stateless reset token; `is_stateless_reset(datagram, tokens)` checks a datagram's last 16 bytes against every token in constant time.
+
+## Packet protection
+
+The ciphers are behind two traits; a TLS session implements them (quic-net has no cipher of its own):
+
+- `PacketKey`: `seal(pn, header, payload) -> Result<[u8; 16], CryptoError>` encrypts in place and returns the tag; `open(pn, header, payload, tag)` checks and decrypts in place; `limits() -> AeadLimits`. The nonce is the IV with the packet number XORed in (`nonce(iv, pn)`), and the header is the associated data.
+- `HeaderKey`: `mask(sample) -> Result<[u8; 5], CryptoError>`.
+
+Sealing: write the header with `LongHeader::encode` or `write_short` (a long header's length counts the tag), append the payload and `TAG_LEN` (16) bytes, then `seal_packet(packet, pn_offset, pn, key, hp)`. With the packet number, the payload must be at least 4 bytes, so the 16-byte sample fits.
+
+Opening is two steps, so the key phase can pick the key: `remove_header_protection(packet, pn_offset, largest_pn, hp) -> Unprotected { pn, pn_len, key_phase }`, then `open_payload(packet, &unprotected, key) -> Range<usize>` (where the frames are). `ProtectError`: `TooShort`, `Crypto`, `Authentication`, `ReservedBits` (checked only after the payload authenticates; `code()` is `PROTOCOL_VIOLATION`), `PacketNumber` (sealing with a number the header does not hold).
+
+```rust
+use quic_net::{open_payload, remove_header_protection, parse_packet};
+let pn_offset = parse_packet(&datagram, 8)?.pn_offset;
+let unprotected = remove_header_protection(&mut datagram, pn_offset, largest_pn, &hp)?;
+let frames_at = open_payload(&mut datagram, &unprotected, &key)?;
+```
+
+Keys: `InitialSecrets::new(&dcid)` gives the client and server Initial secrets (`local(side)`, `remote(side)`). `Secret::key_material(key_len) -> KeyMaterial` (`key()`, `iv()`, `hp()`), `Secret::next()` for a key update (`quic ku`), `Secret::expand_label`. Secrets and key material are zeroed on drop.
+
+Limits: `AeadLimits::{AES_GCM, CHACHA20_POLY1305, AES_CCM}` (RFC 9001 section 6.6). `AeadUsage` counts packets sealed under the current key (`may_seal`, `sealed`, `key_updated`) and forged packets received under any key (`failed` returns `AEAD_LIMIT_REACHED` at the limit).
+
+Retry: `retry_tag(original_dcid, retry_without_tag, aead)` and `verify_retry(original_dcid, packet, aead)` (constant time), with `RetryIntegrity` the AES-128-GCM under `RETRY_KEY_V1` and `RETRY_NONCE_V1`.
 
 ## Errors
 

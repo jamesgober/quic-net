@@ -1,15 +1,19 @@
 //! Costs of the wire layer's hot paths, measured with the standard library's
 //! clock: a short header, a 1-RTT payload of ACK and STREAM frames, writing
-//! those frames, and transport parameters.
+//! those frames, transport parameters, and packet protection with the test
+//! ciphers (`tests/support/ciphers.rs`).
 //!
 //! `cargo bench --bench codec`
+
+#[path = "../tests/support/ciphers.rs"]
+mod ciphers;
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use quic_net::{
-    Ack, ConnectionId, Frame, PacketKind, Side, TransportParameters, VarInt, frames, parse_packet,
-    write_short,
+    Ack, ConnectionId, Frame, InitialSecrets, PacketKind, Side, TAG_LEN, TransportParameters,
+    VarInt, frames, open_payload, parse_packet, remove_header_protection, seal_packet, write_short,
 };
 
 fn time<F: FnMut()>(label: &str, mut f: F) {
@@ -84,6 +88,34 @@ fn main() {
     time("decode transport parameters (7 set)", || {
         black_box(TransportParameters::decode(black_box(&wire), Side::Server).unwrap());
     });
+    let secrets = InitialSecrets::new(&dcid).unwrap();
+    let m = secrets.client.key_material(16).unwrap();
+    let (key, hp) = (ciphers::Key::aes(&m), ciphers::Hp::aes(&m));
+    let mut plain = Vec::new();
+    let at = write_short(&mut plain, &dcid, false, false, 1234, 2);
+    plain.resize(at + 2 + 1200 + TAG_LEN, 0x11);
+    let mut buf = plain.clone();
+    time("seal a 1,200-byte payload (AES-128-GCM)", || {
+        buf.copy_from_slice(&plain);
+        seal_packet(&mut buf, at, 1234, &key, &hp).unwrap();
+    });
+    let sealed = buf.clone();
+    time("open it", || {
+        buf.copy_from_slice(&sealed);
+        let u = remove_header_protection(&mut buf, at, Some(1233), &hp).unwrap();
+        black_box(open_payload(&mut buf, &u, &key).unwrap());
+    });
+    let mut copy_only = plain.clone();
+    time("  of which copying the packet", || {
+        copy_only.copy_from_slice(black_box(&sealed));
+        black_box(&copy_only);
+    });
+    time("derive Initial keys for both directions", || {
+        let s = InitialSecrets::new(black_box(&dcid)).unwrap();
+        black_box(s.client.key_material(16).unwrap());
+        black_box(s.server.key_material(16).unwrap());
+    });
+
     let bytes = [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c];
     time("decode an 8-byte varint", || {
         black_box(VarInt::decode(black_box(&bytes)).unwrap());
