@@ -16,8 +16,8 @@ use quic_net::{
 };
 
 enum Aead {
-    Aes(Aes128Gcm),
-    ChaCha(ChaCha20Poly1305),
+    Aes(Box<Aes128Gcm>),
+    ChaCha(Box<ChaCha20Poly1305>),
 }
 
 /// An AEAD key with its IV.
@@ -28,7 +28,7 @@ pub struct Key {
 
 /// A header protection key.
 pub enum Hp {
-    Aes(aes::Aes128),
+    Aes(Box<aes::Aes128>),
     ChaCha([u8; 32]),
 }
 
@@ -36,7 +36,9 @@ impl Key {
     /// AES-128-GCM from 16-byte key material.
     pub fn aes(m: &KeyMaterial) -> Key {
         Key {
-            aead: Aead::Aes(Aes128Gcm::new_from_slice(m.key()).expect("16-byte key")),
+            aead: Aead::Aes(Box::new(
+                Aes128Gcm::new_from_slice(m.key()).expect("16-byte key"),
+            )),
             iv: *m.iv(),
         }
     }
@@ -44,7 +46,9 @@ impl Key {
     /// ChaCha20-Poly1305 from 32-byte key material.
     pub fn chacha(m: &KeyMaterial) -> Key {
         Key {
-            aead: Aead::ChaCha(ChaCha20Poly1305::new_from_slice(m.key()).expect("32-byte key")),
+            aead: Aead::ChaCha(Box::new(
+                ChaCha20Poly1305::new_from_slice(m.key()).expect("32-byte key"),
+            )),
             iv: *m.iv(),
         }
     }
@@ -53,7 +57,9 @@ impl Key {
 impl Hp {
     /// AES-ECB from 16-byte key material.
     pub fn aes(m: &KeyMaterial) -> Hp {
-        Hp::Aes(aes::Aes128::new_from_slice(m.hp()).expect("16-byte key"))
+        Hp::Aes(Box::new(
+            aes::Aes128::new_from_slice(m.hp()).expect("16-byte key"),
+        ))
     }
 
     /// ChaCha20 from 32-byte key material.
