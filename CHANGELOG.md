@@ -13,6 +13,27 @@
 
 ---
 
+## [0.4.0] - 2026-11-20
+
+Streams and flow control: the parts of RFC 9000 sections 2 to 4 that need
+no handshake.
+
+### Added
+
+- `StreamId`, `LocalStreams`, `RemoteStreams`: stream IDs and stream limits
+  both ways, with the checks for frames on the wrong kind of stream.
+- `RecvCredit` and `SendCredit`: flow control for streams and connections,
+  both ways.
+- `RecvStream`: reassembly at any order, the final size rules, reset, and
+  stop. Data is stored at its offset, so inserting costs only the new bytes.
+  At most 1,024 separate pieces of unread data (`MAX_FRAGMENTS`).
+- `SendStream` and `Chunk`: buffering until acknowledged, credit for new
+  data only, lost data sent again, acknowledgement in any order, reset.
+- `CryptoRecv`: CRYPTO reassembly with a 64 KiB limit (`MAX_CRYPTO_BUFFER`).
+- A test sending streams over a channel that loses, duplicates, and
+  reorders packets and acknowledgements; a `streams` fuzz target; stream
+  costs in `benches/codec.rs`.
+
 ## [0.3.0] - 2026-11-20
 
 Packet protection: everything RFC 9001 section 5 asks of the transport,

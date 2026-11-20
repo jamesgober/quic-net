@@ -23,12 +23,20 @@
 - [x] The RFC 9001 appendix A vectors byte for byte (D-011); fuzz target `protection`; benchmarks.
 - Moved to 0.4, with the reason in PLAN D-012: the connection, stream, and configuration APIs.
 
-## v0.4.0 - Design lock, handshake, and streams
-- [ ] Connection, stream, and configuration APIs (moved from 0.3, D-012).
-- [ ] Keys from tls-net's QUIC interface behind `PacketKey` and `HeaderKey` (PLAN section 5).
-- [ ] Handshake, streams, flow control, address validation.
+## v0.4.0 - Streams and flow control (2026-11-20)
+- [x] Stream IDs and stream limits both ways.
+- [x] Flow control credit both ways, for streams and the connection.
+- [x] Receive streams: reassembly, final size, reset, stop; CRYPTO reassembly with its limit (D-014 to D-016).
+- [x] Send streams: buffering, credit, loss and retransmission, acknowledgement, reset.
+- [x] An end-to-end test over a hostile channel; fuzz target `streams`; benchmarks.
+- Moved to 0.5, with the reason in PLAN D-013: the connection API, keys from tls-net, the handshake, and address validation.
 
-## v0.5.0 - Recovery and migration
+## v0.5.0 - Design lock and handshake
+- [ ] Connection, stream, and configuration APIs (moved from 0.3, D-012, and 0.4, D-013).
+- [ ] Keys from tls-net's QUIC interface behind `PacketKey` and `HeaderKey` (PLAN section 5).
+- [ ] The handshake; address validation with Retry and `NEW_TOKEN` tokens; the anti-amplification limit.
+
+## v0.6.0 - Recovery and migration
 - [ ] Loss detection, congestion control, pacing, migration and path validation.
 
 ## v1.0.0 - Stable

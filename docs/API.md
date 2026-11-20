@@ -1,6 +1,6 @@
 # quic-net - API Reference
 
-> Every public item of `quic-net` `0.3.0`: the wire layer and packet protection. The rustdoc on docs.rs has the full signatures.
+> Every public item of `quic-net` `0.4.0`: the wire layer, packet protection, and streams. The rustdoc on docs.rs has the full signatures.
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
@@ -12,6 +12,7 @@
 - [Transport parameters](#transport-parameters): `TransportParameters`, `PreferredAddress`, `Side`, `MAX_PARAMETERS`
 - [Connection IDs](#connection-ids): `ConnectionId`, `CidError`, `MAX_CID_LEN`, `PeerCids`, `PeerCid`, `LocalCids`, `ResetKey`, `ResetToken`, `is_stateless_reset`, `MIN_STATELESS_RESET`
 - [Packet protection](#packet-protection): `PacketKey`, `HeaderKey`, `seal_packet`, `remove_header_protection`, `open_payload`, `Unprotected`, `ProtectError`, `CryptoError`, `nonce`, `AeadLimits`, `AeadUsage`, `Secret`, `KeyMaterial`, `InitialSecrets`, `RetryIntegrity`, `retry_tag`, `verify_retry`, `TAG_LEN`, `SAMPLE_LEN`, `INITIAL_SALT_V1`, `RETRY_KEY_V1`, `RETRY_NONCE_V1`
+- [Streams and flow control](#streams-and-flow-control): `StreamId`, `LocalStreams`, `RemoteStreams`, `RecvCredit`, `SendCredit`, `RecvStream`, `RecvState`, `SendStream`, `SendState`, `Chunk`, `CryptoRecv`, `MAX_FRAGMENTS`, `MAX_CRYPTO_BUFFER`
 - [Errors](#errors): `DecodeError`, `TransportErrorCode`
 - [`VERSION`](#version)
 
@@ -94,6 +95,47 @@ Keys: `InitialSecrets::new(&dcid)` gives the client and server Initial secrets (
 Limits: `AeadLimits::{AES_GCM, CHACHA20_POLY1305, AES_CCM}` (RFC 9001 section 6.6). `AeadUsage` counts packets sealed under the current key (`may_seal`, `sealed`, `key_updated`) and forged packets received under any key (`failed` returns `AEAD_LIMIT_REACHED` at the limit).
 
 Retry: `retry_tag(original_dcid, retry_without_tag, aead)` and `verify_retry(original_dcid, packet, aead)` (constant time), with `RetryIntegrity` the AES-128-GCM under `RETRY_KEY_V1` and `RETRY_NONCE_V1`.
+
+## Streams and flow control
+
+Each piece does one job and reports what the connection must do next; a connection ties them together (0.5).
+
+- `StreamId::new(initiator, bidi, index)`, `from_raw`, `raw`, `initiator`, `is_bidi`, `index`, and `can_send(local)` / `can_receive(local)` for the `STREAM_STATE_ERROR` checks.
+- `LocalStreams::new(peer_limit)`: `open() -> Option<index>`, `raise(max)` on `MAX_STREAMS`, `blocked()` for `STREAMS_BLOCKED` (once per limit), `is_opened(index)`.
+- `RemoteStreams::new(window)`: `on_frame(index) -> Result<Range<u64>, _>` (the indexes a frame opens; `STREAM_LIMIT_ERROR` past the limit), `on_closed()`, `update()` for `MAX_STREAMS` once half the window has closed.
+- `RecvCredit::new(window)`: `receive_to(end)` for a stream, `receive_more(n)` for a connection (`FLOW_CONTROL_ERROR` past the limit), `consumed(n)`, `update()` for `MAX_DATA` / `MAX_STREAM_DATA` once half the window is read.
+- `SendCredit::new(peer_max)`: `available()`, `consume(n)`, `raise(max)` (a lower limit is ignored), `blocked()` for `DATA_BLOCKED` (once per limit).
+
+`RecvStream::new(window)`:
+- `on_stream(offset, data, fin) -> Result<growth, _>`: the growth of the highest offset goes to the connection's `receive_more`.
+- `on_reset(code, final_size)`.
+- `read(out)`, `readable()`, `stop()` (then send `STOP_SENDING`), `update()`.
+- `take_consumed()` for the connection's `consumed`.
+- `state() -> RecvState` (`Recv`, `SizeKnown`, `DataRecvd`, `DataRead`, `ResetRecvd(code)`), `is_finished()`, `final_size()`, `held()`.
+
+Errors: `FLOW_CONTROL_ERROR`, `FINAL_SIZE_ERROR`, and `PROTOCOL_VIOLATION` past `MAX_FRAGMENTS` (1,024) separate pieces of unread data. The first copy of a byte is kept.
+
+`SendStream::new(peer_max_stream_data, buffer)`:
+- `write(data) -> usize` (what fits), `writable()`, `finish()`.
+- `next_chunk(max_len, connection_credit) -> Option<Chunk { offset, len, fin, new }>`: lost data first, new data within both credits; `new` is what to `consume` from the connection's credit.
+- `write_frame(id, &chunk, out)`.
+- `on_acked(&chunk)`, `on_lost(&chunk)`, `raise(max)`, `blocked()`.
+- `reset(code)`, `on_stop_sending(code)`, `on_reset_acked()`, `on_reset_lost()`.
+- `state() -> SendState`, `held()`, `has_pending()`.
+
+`CryptoRecv`: `on_crypto(offset, data)` (`CRYPTO_BUFFER_EXCEEDED` for data reaching past `MAX_CRYPTO_BUFFER`, 64 KiB, beyond what TLS has read), `read`, `readable`, `read_offset`.
+
+```rust
+use quic_net::{RecvCredit, RecvStream};
+let mut conn = RecvCredit::new(1 << 20);
+let mut stream = RecvStream::new(256 * 1024);
+let growth = stream.on_stream(0, b"hello", true)?;
+conn.receive_more(growth)?;
+let mut out = [0u8; 16];
+let n = stream.read(&mut out);
+conn.consumed(stream.take_consumed());
+# Ok::<(), quic_net::TransportErrorCode>(())
+```
 
 ## Errors
 
