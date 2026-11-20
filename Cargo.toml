@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "quic-net"
-version = "0.1.0"
+version = "0.2.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -24,6 +24,9 @@ keywords = ["quic", "udp", "transport", "http3", "network"]
 # Categories
 categories = ["network-programming"]
 
+# Fuzz targets stay out of the package.
+exclude = ["fuzz/", ".github/"]
+
 # Links
 homepage      = "https://github.com/jamesgober/quic-net"
 repository    = "https://github.com/jamesgober/quic-net"
@@ -35,6 +38,10 @@ authors = ["James Gober <me@jamesgober.com>"]
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+# cargo-fuzz builds with `--cfg fuzzing`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [lib]
 name = "quic_net"
@@ -50,13 +57,19 @@ default = []
 # DEPENDENCIES
 # #################################
 [dependencies]
-# None yet. Planned dependencies and the reason for each are listed in
-# dev/PLAN.md; each is added with the first code that needs it.
+# Keyed BLAKE3 for stateless reset tokens (crypt-io is the one exception to
+# the no-third-party rule: audited cryptography).
+crypt-io = { version = "1.6", default-features = false, features = ["std", "mac-blake3"] }
 
 
 # DEV DEPENDENCIES
 # #################################
 [dev-dependencies]
+
+
+[[bench]]
+name = "codec"
+harness = false
 
 
 # RELEASE PROFILE
