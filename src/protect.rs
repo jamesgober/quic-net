@@ -185,7 +185,7 @@ fn reserved_bits(first: u8) -> u8 {
     if is_long(first) { 0x0c } else { 0x18 }
 }
 
-fn sample<'a>(packet: &'a [u8], pn_offset: usize) -> Result<&'a [u8; SAMPLE_LEN], ProtectError> {
+fn sample(packet: &[u8], pn_offset: usize) -> Result<&[u8; SAMPLE_LEN], ProtectError> {
     let start = pn_offset.checked_add(4).ok_or(ProtectError::TooShort)?;
     let end = start
         .checked_add(SAMPLE_LEN)
