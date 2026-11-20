@@ -58,7 +58,7 @@ impl RangeSet {
             e = e.max(self.r[j].end);
             j += 1;
         }
-        self.r.splice(i..j, [s..e]);
+        self.r.splice(i..j, core::iter::once(s..e));
     }
 
     /// Takes `x` out, splitting a range it falls inside.

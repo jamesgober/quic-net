@@ -29,7 +29,7 @@ impl StreamId {
             return None;
         }
         let low = u64::from(initiator == Side::Server) | (u64::from(!bidi) << 1);
-        Some(StreamId(index << 2 | low))
+        Some(StreamId((index << 2) | low))
     }
 
     /// The ID as sent in a frame; `None` past 2^62 - 1.
