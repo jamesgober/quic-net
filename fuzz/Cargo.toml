@@ -63,3 +63,10 @@ path  = "fuzz_targets/protection.rs"
 test  = false
 doc   = false
 bench = false
+
+[[bin]]
+name  = "streams"
+path  = "fuzz_targets/streams.rs"
+test  = false
+doc   = false
+bench = false

@@ -13,6 +13,12 @@
 //! implements. [`InitialSecrets`] derives the Initial keys' bytes, and
 //! [`AeadUsage`] counts against the AEAD limits.
 //!
+//! Streams (RFC 9000 sections 2 to 4): [`StreamId`], stream limits both ways
+//! ([`LocalStreams`], [`RemoteStreams`]), flow control credit both ways
+//! ([`RecvCredit`], [`SendCredit`]), [`RecvStream`] for reassembly, final
+//! size, and reset, [`SendStream`] for buffering, loss, and retransmission,
+//! and [`CryptoRecv`] for the handshake's CRYPTO data.
+//!
 //! ## Read the frames of a packet
 //!
 //! ```
@@ -54,10 +60,15 @@
 
 mod cid;
 mod error;
+mod flow;
 mod frame;
 mod packet;
 mod params;
 mod protect;
+mod ranges;
+mod recv;
+mod send;
+mod stream;
 mod varint;
 
 pub use cid::{
@@ -65,6 +76,7 @@ pub use cid::{
     ResetKey, ResetToken, is_stateless_reset,
 };
 pub use error::{DecodeError, TransportErrorCode};
+pub use flow::{RecvCredit, SendCredit};
 pub use frame::{
     Ack, AckRanges, EcnCounts, Frame, Frames, MAX_ACK_RANGES, MAX_STREAMS, PacketKind, frames,
 };
@@ -80,6 +92,9 @@ pub use protect::{
     TAG_LEN, Unprotected, nonce, open_payload, remove_header_protection, retry_tag, seal_packet,
     verify_retry,
 };
+pub use recv::{CryptoRecv, MAX_CRYPTO_BUFFER, MAX_FRAGMENTS, RecvState, RecvStream};
+pub use send::{Chunk, SendState, SendStream};
+pub use stream::{LocalStreams, RemoteStreams, StreamId};
 pub use varint::{MAX_VARINT, VarInt};
 
 /// Crate version string, populated by Cargo at build time.

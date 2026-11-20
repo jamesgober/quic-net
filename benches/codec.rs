@@ -1,7 +1,7 @@
 //! Costs of the wire layer's hot paths, measured with the standard library's
 //! clock: a short header, a 1-RTT payload of ACK and STREAM frames, writing
-//! those frames, transport parameters, and packet protection with the test
-//! ciphers (`tests/support/ciphers.rs`).
+//! those frames, transport parameters, packet protection with the test
+//! ciphers (`tests/support/ciphers.rs`), and stream data both ways.
 //!
 //! `cargo bench --bench codec`
 
@@ -12,8 +12,9 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use quic_net::{
-    Ack, ConnectionId, Frame, InitialSecrets, PacketKind, Side, TAG_LEN, TransportParameters,
-    VarInt, frames, open_payload, parse_packet, remove_header_protection, seal_packet, write_short,
+    Ack, ConnectionId, Frame, InitialSecrets, PacketKind, RecvStream, SendStream, Side, StreamId,
+    TAG_LEN, TransportParameters, VarInt, frames, open_payload, parse_packet,
+    remove_header_protection, seal_packet, write_short,
 };
 
 fn time<F: FnMut()>(label: &str, mut f: F) {
@@ -114,6 +115,39 @@ fn main() {
         let s = InitialSecrets::new(black_box(&dcid)).unwrap();
         black_box(s.client.key_material(16).unwrap());
         black_box(s.server.key_material(16).unwrap());
+    });
+
+    // Stream data: 1,200-byte frames, written, sent, and acknowledged on
+    // one side; received in order and read on the other.
+    let id = StreamId::new(Side::Client, true, 0).unwrap();
+    let block = vec![0x42u8; 1200];
+    let mut send = SendStream::new(u64::MAX >> 2, 1 << 20);
+    let mut frame = Vec::with_capacity(1300);
+    time("send a 1,200-byte chunk (write, frame, ack)", || {
+        send.write(&block);
+        let c = send.next_chunk(1200, u64::MAX).unwrap();
+        frame.clear();
+        send.write_frame(id, &c, &mut frame);
+        send.on_acked(&c);
+        black_box(&frame);
+    });
+    let mut recv = RecvStream::new(u64::MAX >> 2);
+    let mut at = 0u64;
+    let mut out = vec![0u8; 1200];
+    time("receive a 1,200-byte chunk in order and read it", || {
+        recv.on_stream(at, &block, false).unwrap();
+        at += 1200;
+        black_box(recv.read(&mut out));
+        black_box(recv.take_consumed());
+    });
+    let mut recv = RecvStream::new(u64::MAX >> 2);
+    let mut base = 0u64;
+    time("receive two chunks out of order, then read", || {
+        recv.on_stream(base + 1200, &block, false).unwrap();
+        recv.on_stream(base, &block, false).unwrap();
+        base += 2400;
+        black_box(recv.read(&mut out));
+        black_box(recv.read(&mut out));
     });
 
     let bytes = [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c];

@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `quic-net`. A living document: every design decision, idea, or open question about quic-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** `0.3.0`: the sans-IO wire layer (0.2) and packet protection over key traits (0.3). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
+> **Status:** `0.4.0`: the sans-IO wire layer (0.2), packet protection over key traits (0.3), and streams with flow control (0.4). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
 
 ---
 
@@ -83,6 +83,36 @@ Measured with the test ciphers (RustCrypto AES-128-GCM, `benches/codec.rs`, Linu
 
 The cipher is nearly all of it; the framing is a few nanoseconds. A TLS provider's AEAD (ring or aws-lc through rustls) is the one that will run in practice.
 
+## 3c. Design of streams and flow control (0.4)
+
+Each part does one job and returns what the connection must do next (a frame to send, a credit to count, an error to close with); the connection that ties them together comes with the handshake (D-013).
+
+- **Stream IDs and limits** (sections 2.1, 3.2, 4.6). `RemoteStreams` refuses a peer's stream past the limit we advertised (`STREAM_LIMIT_ERROR`), opens every lower stream of the type with it, and moves the limit by half a window as streams close. `LocalStreams` opens ours within the peer's limit and reports `STREAMS_BLOCKED` once per limit. `StreamId::can_send` and `can_receive` give the `STREAM_STATE_ERROR` checks.
+- **Flow control** (section 4). `RecvCredit` refuses data past the limit we advertised and moves the limit a window past what the application consumed, once half a window was consumed, so updates are not sent per read. `SendCredit` ignores a lower limit and reports a blocked frame once per limit.
+- **Receiving** (sections 2.2, 3.2, 4.5). Bytes are stored at their offset from the read position in a ring buffer, with a range set of what arrived: inserting costs the new bytes only, in any order, and no byte is copied twice before it is read (D-014). The first copy of a byte is kept. Every frame is checked against the final size and the stream's limit before any byte is stored; a reset drops unread data and counts it as consumed, so the connection's credit moves on; a reset after every byte arrived is ignored. `stop()` drops what is held and counts later data as consumed without storing it.
+- **Sending** (sections 2.2, 3.1, 13.3). Written bytes stay buffered until acknowledged (at most the stream's buffer). `next_chunk` sends lost data first; only bytes never sent before take credit. Acknowledgements may arrive in any order, and a chunk reported lost after it was acknowledged is not sent again.
+- **CRYPTO** (section 7.5). The same reassembly, without flow control but limited to 64 KiB past what TLS has read (D-016).
+
+### Budgets
+
+| What | Bound | Why |
+|---|---|---|
+| a stream's unread data held | its flow control window | the peer cannot send past the limit we advertised |
+| all streams' data held | the connection's window | the growth of every stream's highest offset is counted against it |
+| separate pieces of a stream's unread data | 1,024 (`MAX_FRAGMENTS`); more is `PROTOCOL_VIOLATION` | bounds the range set each insert walks (D-015) |
+| CRYPTO data past what TLS read | 64 KiB per level (`MAX_CRYPTO_BUFFER`); more is `CRYPTO_BUFFER_EXCEEDED` | a server's certificate chain fits; RFC 9000 asks for at least 4,096 bytes (D-016) |
+| a send stream's buffer | set by the caller | written data stays until acknowledged |
+
+### Costs
+
+`benches/codec.rs`, Linux, Rust 1.99, release build, at a load average of 17, so upper bounds:
+
+| Path | Cost |
+|---|---|
+| send 1,200 bytes (write, chunk, frame, acknowledge) | 34 ns |
+| receive 1,200 bytes in order and read them | 21 ns |
+| receive two 1,200-byte chunks out of order and read them | 64 ns |
+
 ## 4. Threats
 
 | Threat | Defence |
@@ -98,6 +128,10 @@ The cipher is nearly all of it; the framing is a few nanoseconds. A TLS provider
 | key wear | packets sealed per key counted; at the confidentiality limit the keys must be updated | one counter |
 | key material left in memory | secrets and key material zeroed on drop | a write of 32 to 76 bytes per drop |
 | reading Initial packets | none possible: Initial keys come from the client's destination ID, which is on the wire, so they guard against tampering by anyone who does not see the packet, not against observers (RFC 9001 section 5.2) | none |
+| memory exhaustion through stream data | a stream holds at most its window, the connection at most its window across streams; data past either limit closes the connection (`FLOW_CONTROL_ERROR`) | none beyond the bookkeeping: the window is memory the receiver offered |
+| stream fragmentation (many small pieces with gaps) | at most 1,024 separate pieces per stream, then `PROTOCOL_VIOLATION`; data stored at its offset, so a hostile order never costs more copying than an in-order one | one range-set walk per frame, at most 1,024 entries |
+| stream ID floods | the peer's streams past our limit are a `STREAM_LIMIT_ERROR`; the limit moves only as streams close | one counter per stream type |
+| CRYPTO buffering (a handshake that never completes) | 64 KiB per level past what TLS has read, then `CRYPTO_BUFFER_EXCEEDED` | at most 64 KiB per level per connection |
 | stateless reset forgery or probing | tokens are keyed BLAKE3 of the ID under a secret key; comparisons in constant time; datagrams under 21 bytes are never resets | one BLAKE3 per issued ID; 16 XORs per token checked |
 
 ## 5. Prerequisites
@@ -162,3 +196,7 @@ Another way to the Initial keys, which need no handshake: crypt-io with AES-128-
 | D-010 | 2026-11-20 | Opening takes two steps (header protection, then the payload), and the reserved bits are checked only after the payload authenticates | the key phase revealed by the first step picks the key for the second (RFC 9001 section 6); RFC 9000 section 17.2 makes nonzero reserved bits an error only after both protections are removed, so a forged packet is dropped, never a connection error |
 | D-011 | 2026-11-20 | RustCrypto `aes`, `aes-gcm`, `chacha20`, and `chacha20poly1305` are dev-dependencies (and fuzz-crate dependencies) for the RFC 9001 appendix A vectors | test-only, at the versions crypt-io already brings in, so no new crate enters the lock file; the library has no cipher of its own |
 | D-012 | 2026-11-20 | The connection, stream, and configuration APIs move from 0.3 to 0.4, with the handshake | the connection API is shaped by how the handshake gets keys and CRYPTO data from tls-net, whose QUIC interface does not exist yet; locking it before then would be a guess. 0.3 ships what does not depend on it |
+| D-013 | 2026-11-20 | 0.4 is streams and flow control; the connection API, keys from tls-net, the handshake, and address validation move to 0.5, recovery and migration to 0.6 | streams, flow control, and CRYPTO reassembly need no TLS and can be finished and fuzzed now; the connection that ties them together still waits on tls-net's QUIC interface (section 5) |
+| D-014 | 2026-11-20 | Received stream data is stored at its offset in a ring buffer, with a range set of what arrived | inserting into a map of chunks and merging touching ones lets a peer send data in an order that copies earlier bytes again on every frame (quadratic work); at its offset, every byte is copied once on arrival and once when read. The ring holds up to the window even for one byte at its end, which flow control allows anyway |
+| D-015 | 2026-11-20 | At most 1,024 separate pieces of unread data per stream; more is `PROTOCOL_VIOLATION` | each insert walks the range set; bounding it bounds the work per frame. RFC 9000 names no error for this; dropping the data would stall the stream, because the packet that carried it was already acknowledged |
+| D-016 | 2026-11-20 | CRYPTO data may reach 64 KiB past what TLS has read | a server's certificate chain arrives in CRYPTO frames and may be tens of kilobytes; RFC 9000 section 7.5 asks for at least 4,096 bytes |
