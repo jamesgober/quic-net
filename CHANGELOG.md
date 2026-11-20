@@ -13,7 +13,7 @@
 
 ---
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-11-20
 
 The wire layer: everything on the wire that needs no keys.
 
