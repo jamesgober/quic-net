@@ -174,9 +174,27 @@ Checked against tls-net 0.10 on 2026-11-20. It has no QUIC interface yet (its pl
 | 0-RTT keys and the server's decision on early data (later) | RFC 9001 section 4.6 | `zero_rtt_keys`, `max_early_data_size` |
 | the Retry integrity tag: AES-128-GCM under a fixed key | RFC 9001 section 5.8 | the provider's AEAD, or crypt-io |
 
-tls-net is not changed from here. These go to its session as a request.
+tls-net is not changed from here; the interface below is what quic-net asks of it.
 
-Since 0.3, quic-net takes keys through two traits, `PacketKey` and `HeaderKey`, whose methods match rustls's `quic::PacketKey` (`encrypt_in_place`, `decrypt_in_place`, the AEAD limits) and `quic::HeaderProtectionKey` (the mask from a sample). tls-net can wrap rustls's keys in a type of its own and implement them, without depending on quic-net, if quic-net implements the traits for tls-net's types instead; which side holds the impls is decided with tls-net's QUIC interface.
+### The interface requested from tls-net (2026-11-20)
+
+Checked against rustls 0.23.46. A `quic` module in tls-net, behind a `quic` feature, with owned wrappers so neither crate's API carries rustls types and tls-net does not depend on quic-net. quic-net implements its own `PacketKey` and `HeaderKey` traits for tls-net's key types (D-017).
+
+| Item | What it does | Wraps |
+|---|---|---|
+| `TlsClient::connect_quic(server_name, transport_params)`, `TlsServer::accept_quic(transport_params)` | a QUIC handshake with our encoded transport parameters, on the configs tls-net already builds; refused at construction without TLS 1.3 only, without ALPN, or with a server early-data limit other than 0 or 2^32 - 1; the ClientHello hook, host scoping, limits, and observer apply as for TCP | `quic::ClientConnection::new`, `quic::ServerConnection::new` (`Version::V1`) |
+| `QuicSession::read_handshake(data)`, `write_handshake(out) -> Option<KeyChange>` | CRYPTO bytes in, in order; CRYPTO bytes out at the current level, with the key change that ends it | `read_hs`, `write_hs` |
+| `peer_transport_parameters()`, `alert()`, `alpn()`, `is_handshaking()`, `server_name()`, `peer_certificates()`, `negotiated_suite()` | the peer's parameters, the alert for `CRYPTO_ERROR`, what was agreed | `quic_transport_parameters`, `alert`, and the common connection accessors |
+| `KeyChange { Handshake { keys }, OneRtt { keys, next } }`, `Keys { local, remote }`, `DirectionalKeys { packet, header }` | the keys of each level as they become available | the same rustls types |
+| `PacketKey::{seal, open, tag_len, confidentiality_limit, integrity_limit}` | AEAD in place; `open` takes the payload and its tag as one slice | `quic::PacketKey` |
+| `HeaderKey::mask(sample) -> [u8; 5]` | the header protection mask | `quic::HeaderProtectionKey::encrypt_in_place` on a short header with a 4-byte packet number of zeros, which yields every mask bit QUIC uses |
+| `Secrets::next_packet_keys() -> PacketKeySet { local, remote }` | key updates | `quic::Secrets` |
+| `initial_keys(client_dcid, side) -> Keys` | Initial keys before any session exists | `quic::Keys::initial` with the provider's AES-128-GCM QUIC suite |
+| `retry_tag(pseudo_packet) -> [u8; 16]` | the Retry integrity tag | the provider's AES-128-GCM (rustls does not expose it) |
+
+Later, not needed for the first handshake: `zero_rtt_keys`, `is_early_data_accepted`, `reject_early_data`. Not needed: QUIC version 2 and multipath.
+
+Tests asked for with it: the RFC 9001 appendix A Initial and Retry vectors; a client and a server handshaking in memory to 1-RTT keys with each other's transport parameters and ALPN; refusal without ALPN and the `no_application_protocol` alert on a mismatch; the A.5 key update chain; both providers tls-net ships.
 
 Another way to the Initial keys, which need no handshake: crypt-io with AES-128-GCM under a caller's nonce, a single AES block, and the ChaCha20 keystream. crypt-io 1.6 has none of the three (its AEAD makes its own random nonce, and its AES-GCM is AES-256).
 
@@ -200,3 +218,4 @@ Another way to the Initial keys, which need no handshake: crypt-io with AES-128-
 | D-014 | 2026-11-20 | Received stream data is stored at its offset in a ring buffer, with a range set of what arrived | inserting into a map of chunks and merging touching ones lets a peer send data in an order that copies earlier bytes again on every frame (quadratic work); at its offset, every byte is copied once on arrival and once when read. The ring holds up to the window even for one byte at its end, which flow control allows anyway |
 | D-015 | 2026-11-20 | At most 1,024 separate pieces of unread data per stream; more is `PROTOCOL_VIOLATION` | each insert walks the range set; bounding it bounds the work per frame. RFC 9000 names no error for this; dropping the data would stall the stream, because the packet that carried it was already acknowledged |
 | D-016 | 2026-11-20 | CRYPTO data may reach 64 KiB past what TLS has read | a server's certificate chain arrives in CRYPTO frames and may be tens of kilobytes; RFC 9000 section 7.5 asks for at least 4,096 bytes |
+| D-017 | 2026-11-20 | Keys come from a `quic` module in tls-net with owned wrappers around rustls's QUIC types (section 5); quic-net implements its `PacketKey` and `HeaderKey` traits for them, and `PacketKey::open` changes in 0.5 to take the payload and tag as one slice | neither crate's API then carries rustls types, tls-net does not depend on quic-net, and the orphan rule allows the impls in quic-net, which owns the traits; the payload and tag are contiguous in a packet, and rustls opens them that way |
