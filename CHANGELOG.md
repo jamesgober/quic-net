@@ -13,6 +13,32 @@
 
 ---
 
+## [0.2.0] - unreleased
+
+The wire layer: everything on the wire that needs no keys.
+
+### Added
+
+- `VarInt`: variable-length integers (RFC 9000 section 16).
+- `parse_packet`, `coalesced`, `LongHeader`, `write_short`,
+  `write_version_negotiation`, `write_retry`, `packet_number_len`,
+  `decode_packet_number`: packet headers read before header protection,
+  version negotiation, Retry, a datagram's coalesced packets, and packet
+  number encoding (section 17, appendix A).
+- `Frame` and `frames`: all 21 transport frame types of version 1, decoded
+  without copying, checked against the packet type that carries them, and
+  written back; `Ack::write` for ACK frames.
+- `TransportParameters`: every version 1 parameter, with its range and the
+  side that may send it (section 18).
+- `ConnectionId`, `PeerCids`, `LocalCids`: connection IDs both ways
+  (sections 5.1, 19.15, 19.16). `ResetKey`, `ResetToken`,
+  `is_stateless_reset`: stateless reset tokens from keyed BLAKE3, compared in
+  constant time (section 10.3).
+- `DecodeError` and `TransportErrorCode`.
+- Fuzz targets for every decoder, and benchmarks.
+
+---
+
 ## [0.1.0] - 2026-10-13
 
 The scaffold and the plan. No functional code yet.
@@ -25,5 +51,6 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/quic-net/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jamesgober/quic-net/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jamesgober/quic-net/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/quic-net/releases/tag/v0.1.0

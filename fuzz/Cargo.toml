@@ -1,0 +1,53 @@
+[package]
+name    = "quic-net-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+authors = ["James Gober <me@jamesgober.com>"]
+description = "cargo-fuzz targets for quic-net (not published)."
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone: not a member of any workspace above it.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+quic-net      = { path = ".." }
+
+[[bin]]
+name  = "varint"
+path  = "fuzz_targets/varint.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "packet"
+path  = "fuzz_targets/packet.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "frames"
+path  = "fuzz_targets/frames.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "transport_params"
+path  = "fuzz_targets/transport_params.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "connection_ids"
+path  = "fuzz_targets/connection_ids.rs"
+test  = false
+doc   = false
+bench = false
