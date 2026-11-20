@@ -13,6 +13,7 @@
 - [Connection IDs](#connection-ids): `ConnectionId`, `CidError`, `MAX_CID_LEN`, `PeerCids`, `PeerCid`, `LocalCids`, `ResetKey`, `ResetToken`, `is_stateless_reset`, `MIN_STATELESS_RESET`
 - [Packet protection](#packet-protection): `PacketKey`, `HeaderKey`, `seal_packet`, `remove_header_protection`, `open_payload`, `Unprotected`, `ProtectError`, `CryptoError`, `nonce`, `AeadLimits`, `AeadUsage`, `Secret`, `KeyMaterial`, `InitialSecrets`, `RetryIntegrity`, `retry_tag`, `verify_retry`, `TAG_LEN`, `SAMPLE_LEN`, `INITIAL_SALT_V1`, `RETRY_KEY_V1`, `RETRY_NONCE_V1`
 - [Streams and flow control](#streams-and-flow-control): `StreamId`, `LocalStreams`, `RemoteStreams`, `RecvCredit`, `SendCredit`, `RecvStream`, `RecvState`, `SendStream`, `SendState`, `Chunk`, `CryptoRecv`, `MAX_FRAGMENTS`, `MAX_CRYPTO_BUFFER`
+- [Address validation](#address-validation): `Tokens`, `TokenCheck`, `MAX_TOKEN_LEN`, `Amplification`
 - [Errors](#errors): `DecodeError`, `TransportErrorCode`
 - [`VERSION`](#version)
 
@@ -136,6 +137,18 @@ let n = stream.read(&mut out);
 conn.consumed(stream.take_consumed());
 # Ok::<(), quic_net::TransportErrorCode>(())
 ```
+
+## Address validation
+
+`Tokens::new(key)` issues and checks address validation tokens under a 32-byte secret key, sealed with XChaCha20-Poly1305 through crypt-io (hidden and authenticated). `rotate(key)` moves to a new key and keeps the previous one; `retry_lifetime` (10 s by default) and `new_token_lifetime` (24 h).
+
+- `retry_token(client, original_dcid, retry_scid, now)`: for a Retry; bound to the client's address and port.
+- `new_token(client_ip, now)`: for a `NEW_TOKEN` frame; bound to the IP address only.
+- `check(token, client, now) -> TokenCheck`: `Retry { original_dcid, retry_scid }` or `NewToken` (the address is validated), `InvalidRetry` (close with `code()`, `INVALID_TOKEN`), or `Unusable` (treat as no token). Tokens over `MAX_TOKEN_LEN` (160) bytes are not decrypted.
+
+`now` is the time since the Unix epoch; the caller supplies it, so the crate does no I/O.
+
+`Amplification` (one per path): `new()` for an unvalidated address, `validated()` for a client's view of its server; `on_received(len)` for every datagram attributed to the connection, `on_sent(len)`, `allowance()` (three times received, less sent), `is_blocked()`, `validate()`.
 
 ## Errors
 

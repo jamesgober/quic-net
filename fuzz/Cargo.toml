@@ -70,3 +70,10 @@ path  = "fuzz_targets/streams.rs"
 test  = false
 doc   = false
 bench = false
+
+[[bin]]
+name  = "tokens"
+path  = "fuzz_targets/tokens.rs"
+test  = false
+doc   = false
+bench = false
