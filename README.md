@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>.
     </p>
     <blockquote>
-        <strong>Status: <code>0.2.0</code>, the wire layer.</strong> Packet headers, version negotiation, every transport frame, transport parameters, and connection IDs with stateless reset tokens, all without I/O and without TLS. Packet protection, the handshake, and streams follow (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>).
+        <strong>Status: <code>0.3.0</code>, the wire layer and packet protection.</strong> Packet headers, version negotiation, every transport frame, transport parameters, and connection IDs with stateless reset tokens, all without I/O. Header and packet protection, the Initial key schedule, the AEAD limits, and the Retry integrity tag, over key traits a TLS session implements. The handshake, the connection API, and streams follow (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>).
     </blockquote>
 </div>
 

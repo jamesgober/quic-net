@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `quic-net`. A living document: every design decision, idea, or open question about quic-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** `0.2.0` in progress: the sans-IO wire layer that needs no TLS (started 2026-11-20, D-001). The largest crate in the network family.
+> **Status:** `0.3.0`: the sans-IO wire layer (0.2) and packet protection over key traits (0.3). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
 
 ---
 
@@ -62,6 +62,27 @@ The first milestone is everything on the wire that needs no keys. It is sans-IO,
 
 Each stateless reset check compares every token of the connection in constant time: 16 byte XORs per token.
 
+## 3b. Design of packet protection (0.3)
+
+RFC 9001 section 5, without a cipher of its own:
+
+- **Two key traits.** `PacketKey` seals and opens a payload in place under the nonce made from the packet number, with the header as associated data; `HeaderKey` turns a 16-byte sample into the mask. A TLS session implements them. rustls's `quic::PacketKey` and `quic::HeaderProtectionKey` have the same shape, so tls-net's wrapper can implement them directly (section 5).
+- **Framing here.** Where the sample is, which first-byte bits the mask covers (4 in a long header, 5 in a short one), the packet number's length and full value, the tag's place, and the reserved bits.
+- **Opening in two steps.** Header protection comes off first and reveals the key phase; the caller picks the key and opens the payload. The reserved bits are checked only after the payload authenticates, as RFC 9000 section 17.2 requires, so a forged packet cannot provoke a connection error.
+- **Initial keys here.** `InitialSecrets` runs HKDF-Extract and HKDF-Expand-Label over crypt-io's HMAC-SHA256, and `Secret::key_material` gives the key, IV, and header key bytes for any version 1 suite with a SHA-256 secret. Secrets and key material are zeroed on drop.
+- **Limits.** `AeadUsage` counts packets sealed under the current key against the confidentiality limit, and packets failing authentication under any key against the integrity limit, which closes the connection with `AEAD_LIMIT_REACHED`.
+- **Retry.** The integrity tag over the pseudo-packet, compared in constant time.
+
+Measured with the test ciphers (RustCrypto AES-128-GCM, `benches/codec.rs`, Linux, Rust 1.99, release build, at a load average of 7, so upper bounds):
+
+| Path | Cost |
+|---|---|
+| seal a 1,200-byte payload | 713 ns |
+| open it (header protection, then the payload) | 740 ns |
+| derive the Initial keys of both directions | 1.2 us, once per connection |
+
+The cipher is nearly all of it; the framing is a few nanoseconds. A TLS provider's AEAD (ring or aws-lc through rustls) is the one that will run in practice.
+
 ## 4. Threats
 
 | Threat | Defence |
@@ -72,6 +93,11 @@ Each stateless reset check compares every token of the connection in constant ti
 | handshake floods | stateless retry under load |
 | malformed or oversized input | strict decoding, every length checked before it is read, the budgets of section 3a | none measurable (section 3a costs) |
 | connection ID floods | the peer's IDs bounded by our limit, retirements bounded; NEW_CONNECTION_ID contradictions refused (`PROTOCOL_VIOLATION`) | a map of at most the limit's entries per connection |
+| forged or altered packets | every packet is authenticated (AEAD) before anything in it is used; the reserved bits and the frames are read only after | one AEAD open per packet, about 0.7 us per 1,200 bytes with the test ciphers |
+| forgery by brute force against the AEAD | packets failing authentication counted across all keys; at the integrity limit the connection closes with `AEAD_LIMIT_REACHED` (RFC 9001 section 6.6) | one counter |
+| key wear | packets sealed per key counted; at the confidentiality limit the keys must be updated | one counter |
+| key material left in memory | secrets and key material zeroed on drop | a write of 32 to 76 bytes per drop |
+| reading Initial packets | none possible: Initial keys come from the client's destination ID, which is on the wire, so they guard against tampering by anyone who does not see the packet, not against observers (RFC 9001 section 5.2) | none |
 | stateless reset forgery or probing | tokens are keyed BLAKE3 of the ID under a secret key; comparisons in constant time; datagrams under 21 bytes are never resets | one BLAKE3 per issued ID; 16 XORs per token checked |
 
 ## 5. Prerequisites
@@ -116,6 +142,10 @@ Checked against tls-net 0.10 on 2026-11-20. It has no QUIC interface yet (its pl
 
 tls-net is not changed from here. These go to its session as a request.
 
+Since 0.3, quic-net takes keys through two traits, `PacketKey` and `HeaderKey`, whose methods match rustls's `quic::PacketKey` (`encrypt_in_place`, `decrypt_in_place`, the AEAD limits) and `quic::HeaderProtectionKey` (the mask from a sample). tls-net can wrap rustls's keys in a type of its own and implement them, without depending on quic-net, if quic-net implements the traits for tls-net's types instead; which side holds the impls is decided with tls-net's QUIC interface.
+
+Another way to the Initial keys, which need no handshake: crypt-io with AES-128-GCM under a caller's nonce, a single AES block, and the ChaCha20 keystream. crypt-io 1.6 has none of the three (its AEAD makes its own random nonce, and its AES-GCM is AES-256).
+
 ## 6. Decision log
 
 | Id | Date | Decision | Reason |
@@ -128,3 +158,7 @@ tls-net is not changed from here. These go to its session as a request.
 | D-006 | 2026-11-20 | Stateless reset tokens are keyed BLAKE3 of the connection ID through crypt-io; compared in constant time | a token must be computable without connection state and unforgeable without the key (RFC 9000 section 10.3.2); crypt-io is the allowed crypto dependency |
 | D-007 | 2026-11-20 | Headers are parsed before header protection is removed and report where the packet number starts; unprotecting is the next layer's | the protected bits cannot be read without keys; splitting the work keeps this layer free of crypto |
 | D-008 | 2026-11-20 | The prerequisites from tls-net are listed in section 5; tls-net is not changed from this repository | its QUIC wrapper is its own work and decision |
+| D-009 | 2026-11-20 | Packet protection is a layer over two key traits, `PacketKey` and `HeaderKey`; the ciphers come from a TLS session; the Initial key schedule is here, over crypt-io's HMAC-SHA256 | crypt-io 1.6 has no AES-128-GCM under a caller's nonce, no raw AES block, and no ChaCha20 keystream, and tls-net has no QUIC interface yet; the framing (sample, mask bits, packet numbers, reserved bits, limits) is the transport's either way and can be finished and fuzzed now |
+| D-010 | 2026-11-20 | Opening takes two steps (header protection, then the payload), and the reserved bits are checked only after the payload authenticates | the key phase revealed by the first step picks the key for the second (RFC 9001 section 6); RFC 9000 section 17.2 makes nonzero reserved bits an error only after both protections are removed, so a forged packet is dropped, never a connection error |
+| D-011 | 2026-11-20 | RustCrypto `aes`, `aes-gcm`, `chacha20`, and `chacha20poly1305` are dev-dependencies (and fuzz-crate dependencies) for the RFC 9001 appendix A vectors | test-only, at the versions crypt-io already brings in, so no new crate enters the lock file; the library has no cipher of its own |
+| D-012 | 2026-11-20 | The connection, stream, and configuration APIs move from 0.3 to 0.4, with the handshake | the connection API is shaped by how the handshake gets keys and CRYPTO data from tls-net, whose QUIC interface does not exist yet; locking it before then would be a guess. 0.3 ships what does not depend on it |

@@ -1,11 +1,17 @@
 //! # quic_net
 //!
 //! QUIC (RFC 9000) for Rust, built up from its parts. This release has the
-//! sans-IO wire layer that needs no TLS: variable-length integers, packet
-//! headers and version negotiation, every transport frame, transport
-//! parameters, and connection IDs with their stateless reset tokens. Every
-//! decoder works on borrowed bytes, checks lengths before it reads, and
-//! keeps counts within fixed budgets.
+//! sans-IO wire layer: variable-length integers, packet headers and version
+//! negotiation, every transport frame, transport parameters, and connection
+//! IDs with their stateless reset tokens. Every decoder works on borrowed
+//! bytes, checks lengths before it reads, and keeps counts within fixed
+//! budgets.
+//!
+//! Packet protection (RFC 9001 section 5) sits on top: [`seal_packet`],
+//! [`remove_header_protection`], and [`open_payload`] do the framing around
+//! two key traits, [`PacketKey`] and [`HeaderKey`], which a TLS session
+//! implements. [`InitialSecrets`] derives the Initial keys' bytes, and
+//! [`AeadUsage`] counts against the AEAD limits.
 //!
 //! ## Read the frames of a packet
 //!
@@ -51,6 +57,7 @@ mod error;
 mod frame;
 mod packet;
 mod params;
+mod protect;
 mod varint;
 
 pub use cid::{
@@ -67,6 +74,12 @@ pub use packet::{
     write_retry, write_short, write_version_negotiation,
 };
 pub use params::{MAX_PARAMETERS, PreferredAddress, Side, TransportParameters};
+pub use protect::{
+    AeadLimits, AeadUsage, CryptoError, HeaderKey, INITIAL_SALT_V1, InitialSecrets, KeyMaterial,
+    PacketKey, ProtectError, RETRY_KEY_V1, RETRY_NONCE_V1, RetryIntegrity, SAMPLE_LEN, Secret,
+    TAG_LEN, Unprotected, nonce, open_payload, remove_header_protection, retry_tag, seal_packet,
+    verify_retry,
+};
 pub use varint::{MAX_VARINT, VarInt};
 
 /// Crate version string, populated by Cargo at build time.

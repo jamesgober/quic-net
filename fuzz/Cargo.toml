@@ -14,8 +14,13 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
-libfuzzer-sys = "0.4"
-quic-net      = { path = ".." }
+libfuzzer-sys    = "0.4"
+quic-net         = { path = ".." }
+# The test ciphers of `tests/support/ciphers.rs`, for the protection target.
+aes              = "0.8.4"
+aes-gcm          = "0.10.3"
+chacha20         = "0.9.1"
+chacha20poly1305 = "0.10.1"
 
 [[bin]]
 name  = "varint"
@@ -48,6 +53,13 @@ bench = false
 [[bin]]
 name  = "connection_ids"
 path  = "fuzz_targets/connection_ids.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "protection"
+path  = "fuzz_targets/protection.rs"
 test  = false
 doc   = false
 bench = false

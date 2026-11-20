@@ -16,11 +16,16 @@
 - [x] A fuzz target for every decoder; benchmarks of the hot paths.
 - [x] Prerequisites from net-io and tls-net listed in PLAN section 5.
 
-## v0.3.0 - Design lock and packet protection
-- [ ] Connection, stream, and configuration APIs.
-- [ ] Packet protection and header protection, the Retry integrity tag, on tls-net's QUIC interface (once it has one; PLAN section 5).
+## v0.3.0 - Packet protection (2026-11-20)
+- [x] Header protection and packet protection over key traits (`PacketKey`, `HeaderKey`), opened in two steps; the reserved bits checked after authentication (D-009, D-010).
+- [x] The Initial key schedule, key material, and key update secrets; secrets zeroed on drop.
+- [x] AEAD limits (RFC 9001 section 6.6) and the Retry integrity tag.
+- [x] The RFC 9001 appendix A vectors byte for byte (D-011); fuzz target `protection`; benchmarks.
+- Moved to 0.4, with the reason in PLAN D-012: the connection, stream, and configuration APIs.
 
-## v0.4.0 - Handshake and streams
+## v0.4.0 - Design lock, handshake, and streams
+- [ ] Connection, stream, and configuration APIs (moved from 0.3, D-012).
+- [ ] Keys from tls-net's QUIC interface behind `PacketKey` and `HeaderKey` (PLAN section 5).
 - [ ] Handshake, streams, flow control, address validation.
 
 ## v0.5.0 - Recovery and migration

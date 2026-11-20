@@ -140,7 +140,7 @@ impl fmt::Debug for ResetToken {
 
 /// Equality without an early exit, so the time taken says nothing about
 /// where two tokens differ.
-fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
+pub(crate) fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
     let mut d = 0u8;
     for i in 0..16 {
         d |= a[i] ^ b[i];
