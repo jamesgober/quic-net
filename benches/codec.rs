@@ -1,7 +1,8 @@
 //! Costs of the wire layer's hot paths, measured with the standard library's
 //! clock: a short header, a 1-RTT payload of ACK and STREAM frames, writing
 //! those frames, transport parameters, packet protection with the test
-//! ciphers (`tests/support/ciphers.rs`), and stream data both ways.
+//! ciphers (`tests/support/ciphers.rs`), stream data both ways, and address
+//! validation tokens.
 //!
 //! `cargo bench --bench codec`
 
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use quic_net::{
     Ack, ConnectionId, Frame, InitialSecrets, PacketKind, RecvStream, SendStream, Side, StreamId,
-    TAG_LEN, TransportParameters, VarInt, frames, open_payload, parse_packet,
+    TAG_LEN, Tokens, TransportParameters, VarInt, frames, open_payload, parse_packet,
     remove_header_protection, seal_packet, write_short,
 };
 
@@ -148,6 +149,22 @@ fn main() {
         base += 2400;
         black_box(recv.read(&mut out));
         black_box(recv.read(&mut out));
+    });
+
+    let tokens = Tokens::new([9; 32]).unwrap();
+    let client = "192.0.2.1:4433".parse().unwrap();
+    let now = Duration::from_secs(1_800_000_000);
+    time("issue a Retry token", || {
+        black_box(tokens.retry_token(client, &dcid, &dcid, now).unwrap());
+    });
+    let token = tokens.retry_token(client, &dcid, &dcid, now).unwrap();
+    time("check it", || {
+        black_box(tokens.check(black_box(&token), client, now));
+    });
+    let mut forged = token.clone();
+    forged[20] ^= 1;
+    time("refuse an altered token", || {
+        black_box(tokens.check(black_box(&forged), client, now));
     });
 
     let bytes = [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c];

@@ -57,10 +57,10 @@ default = []
 # DEPENDENCIES
 # #################################
 [dependencies]
-# Keyed BLAKE3 for stateless reset tokens and HMAC-SHA256 for the Initial
-# key schedule (crypt-io is the one exception to the no-third-party rule:
-# audited cryptography).
-crypt-io = { version = "1.6", default-features = false, features = ["std", "mac-blake3", "mac-hmac"] }
+# Keyed BLAKE3 for stateless reset tokens, HMAC-SHA256 for the Initial key
+# schedule, and XChaCha20-Poly1305 for address validation tokens (crypt-io
+# is the one exception to the no-third-party rule: audited cryptography).
+crypt-io = { version = "1.6", default-features = false, features = ["std", "mac-blake3", "mac-hmac", "aead-chacha20"] }
 
 
 # DEV DEPENDENCIES

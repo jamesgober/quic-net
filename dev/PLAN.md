@@ -113,6 +113,28 @@ Each part does one job and returns what the connection must do next (a frame to 
 | receive 1,200 bytes in order and read them | 21 ns |
 | receive two 1,200-byte chunks out of order and read them | 64 ns |
 
+## 3d. Design of address validation (0.5)
+
+RFC 9000 section 8, without a connection yet:
+
+- **Tokens** are sealed with XChaCha20-Poly1305 through crypt-io, under a server key, with a two-byte clear header: the kind (Retry or `NEW_TOKEN`) and the key's ID. The contents are hidden as well as authenticated: a `NEW_TOKEN` token travels in clear in a later connection's Initial, and an observer must not be able to link the two connections through it (section 8.1.3). The 192-bit random nonce never repeats under one key, however many tokens a busy server issues (D-018).
+- **A Retry token** holds the issue time, the client's address and port, the original destination ID, and the Retry's source ID, so the server recovers what its transport parameters must carry without keeping state. Valid for 10 seconds by default. An invalid one that claims to be a Retry token is `INVALID_TOKEN` (section 8.1.2).
+- **A `NEW_TOKEN` token** holds the issue time and the client's IP address, not its port, which changes with every connection. Valid for 24 hours by default. An invalid one is treated as no token (section 8.1.3).
+- **Key rotation** keeps one previous key, so tokens issued just before a rotation still validate (D-019).
+- **The amplification limit** is counted per path, as RFC 9000 asks (net-io's guard counts per IP; section 5). Every datagram attributed to the connection counts, including ones whose packets were all dropped (D-020).
+
+Replay: a `NEW_TOKEN` token can be replayed from the same IP address within its lifetime. That only proves an address the replayer already sends from, and a server wanting more can keep a filter of tokens seen; the crate does not, to stay stateless.
+
+`benches/codec.rs`, Linux, at a load average of 2:
+
+| Path | Cost |
+|---|---|
+| issue a Retry token | 1.2 us |
+| check one | 1.1 us |
+| refuse an altered one | 0.9 us |
+
+Next to the Initial packet it arrives in (an AEAD open, then TLS), a token check is small.
+
 ## 4. Threats
 
 | Threat | Defence |
@@ -132,6 +154,9 @@ Each part does one job and returns what the connection must do next (a frame to 
 | stream fragmentation (many small pieces with gaps) | at most 1,024 separate pieces per stream, then `PROTOCOL_VIOLATION`; data stored at its offset, so a hostile order never costs more copying than an in-order one | one range-set walk per frame, at most 1,024 entries |
 | stream ID floods | the peer's streams past our limit are a `STREAM_LIMIT_ERROR`; the limit moves only as streams close | one counter per stream type |
 | CRYPTO buffering (a handshake that never completes) | 64 KiB per level past what TLS has read, then `CRYPTO_BUFFER_EXCEEDED` | at most 64 KiB per level per connection |
+| forged or altered address validation tokens | AEAD under a server key: a token that does not authenticate, has expired, or names another address validates nothing | about 1 us per token checked |
+| linking connections through `NEW_TOKEN` tokens | the token's contents are encrypted, and a fresh nonce makes every token different | none beyond the AEAD |
+| amplification through an unvalidated address | at most three times the bytes received on the path until it is validated, counted per path | two counters per path |
 | stateless reset forgery or probing | tokens are keyed BLAKE3 of the ID under a secret key; comparisons in constant time; datagrams under 21 bytes are never resets | one BLAKE3 per issued ID; 16 XORs per token checked |
 
 ## 5. Prerequisites
@@ -219,3 +244,6 @@ Another way to the Initial keys, which need no handshake: crypt-io with AES-128-
 | D-015 | 2026-11-20 | At most 1,024 separate pieces of unread data per stream; more is `PROTOCOL_VIOLATION` | each insert walks the range set; bounding it bounds the work per frame. RFC 9000 names no error for this; dropping the data would stall the stream, because the packet that carried it was already acknowledged |
 | D-016 | 2026-11-20 | CRYPTO data may reach 64 KiB past what TLS has read | a server's certificate chain arrives in CRYPTO frames and may be tens of kilobytes; RFC 9000 section 7.5 asks for at least 4,096 bytes |
 | D-017 | 2026-11-20 | Keys come from a `quic` module in tls-net with owned wrappers around rustls's QUIC types (section 5); quic-net implements its `PacketKey` and `HeaderKey` traits for them, and `PacketKey::open` changes in 0.5 to take the payload and tag as one slice | neither crate's API then carries rustls types, tls-net does not depend on quic-net, and the orphan rule allows the impls in quic-net, which owns the traits; the payload and tag are contiguous in a packet, and rustls opens them that way |
+| D-018 | 2026-11-20 | Address validation tokens are sealed with XChaCha20-Poly1305 through crypt-io, not only authenticated | a `NEW_TOKEN` token is sent in clear on a later connection; with a MAC alone, the address it was issued to would be readable and would link the two connections (RFC 9000 section 8.1.3). The 192-bit random nonce makes a nonce collision under one key impossible in practice, at one extra ChaCha20 block per token |
+| D-019 | 2026-11-20 | Token keys rotate with one previous key kept; the key ID is a clear byte of the token | a rotation must not void every outstanding `NEW_TOKEN` token at once; one previous key covers a rotation period longer than a token's lifetime |
+| D-020 | 2026-11-20 | The amplification limit is counted per path in quic-net, not taken from net-io's guard | net-io counts per IP address and ages received bytes out after its window; RFC 9000 counts per path (address and port) until the path is validated. With net-io's guard, a second port of the same IP would share the first port's allowance, and a slow handshake could lose its allowance |

@@ -34,7 +34,8 @@
 ## v0.5.0 - Design lock and handshake
 - [ ] Connection, stream, and configuration APIs (moved from 0.3, D-012, and 0.4, D-013).
 - [ ] Keys from tls-net's QUIC interface behind `PacketKey` and `HeaderKey` (PLAN section 5).
-- [ ] The handshake; address validation with Retry and `NEW_TOKEN` tokens; the anti-amplification limit.
+- [ ] The handshake.
+- [x] Address validation tokens (Retry and `NEW_TOKEN`) and the anti-amplification limit of a path (D-018 to D-020).
 
 ## v0.6.0 - Recovery and migration
 - [ ] Loss detection, congestion control, pacing, migration and path validation.
