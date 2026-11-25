@@ -208,6 +208,7 @@ impl SendStream {
 
     /// Writes the `CRYPTO` frame for `chunk`, when the stream carries a
     /// level's handshake data.
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     pub(crate) fn write_crypto_frame(&self, chunk: &Chunk, out: &mut Vec<u8>) {
         put(out, 0x06);
         put(out, chunk.offset);

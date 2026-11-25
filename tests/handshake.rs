@@ -21,7 +21,7 @@ fn tls() -> (TlsClient, TlsServer) {
     let server = TlsServer::builder()
         .certificate(&data("site.pem"), KeySource::Pem(&data("site.key")))
         .unwrap()
-        .alpn(&[h3.clone()])
+        .alpn(std::slice::from_ref(&h3))
         .build()
         .unwrap();
     let client = TlsClient::builder()
@@ -80,7 +80,7 @@ impl Pair {
     fn with(client_tls: &TlsClient, server_tls: &TlsServer) -> Pair {
         let now = Instant::now();
         let mut client = Connection::client(
-            &client_tls,
+            client_tls,
             "localhost",
             Config::default(),
             cid(0xc1),
@@ -89,7 +89,7 @@ impl Pair {
         )
         .unwrap();
         let first = first_initial(&mut client, now);
-        let server = server_for(&server_tls, &first, now);
+        let server = server_for(server_tls, &first, now);
         Pair {
             client,
             server,

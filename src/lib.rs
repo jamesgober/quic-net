@@ -24,7 +24,7 @@
 //! and [`Amplification`] keeps a server within three times what it
 //! received until the client's address is validated.
 //!
-//! With the `tls` feature (on by default), [`Connection`] puts it together:
+//! With the `tls` feature (on by default), `Connection` puts it together:
 //! a client or server connection, sans-IO, whose handshake runs through
 //! tls-net. The caller passes it datagrams, sends what it produces, and
 //! runs its timers.

@@ -1816,7 +1816,7 @@ impl Connection {
 
     fn write_ack(&mut self, now: Instant, level: Level, payload: &mut Vec<u8>) {
         let s = &mut self.spaces[level as usize];
-        if s.unacked == 0 && !(s.probe && !s.received.is_empty()) {
+        if s.unacked == 0 && (!s.probe || s.received.is_empty()) {
             return;
         }
         let ranges: Vec<core::ops::RangeInclusive<u64>> = s.received.iter_desc().collect();
