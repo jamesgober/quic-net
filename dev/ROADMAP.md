@@ -52,6 +52,7 @@
 - [ ] Key updates started by this endpoint (moved from 0.7, D-029).
 - [ ] 0-RTT (moved from 0.7, D-029).
 - [ ] The server's preferred address.
+- [ ] For the h3 engine (`H3.md` section 5): `Event::StreamWritable`, send order or urgency per stream, and reading stream data without copying (D-032).
 
 ## v1.0.0 - Stable
 - [ ] Frozen after an HTTP/3 engine has used it end to end.

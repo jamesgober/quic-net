@@ -176,6 +176,10 @@ RFC 9000 sections 8 and 9. The connection now knows the peer's address: `handle_
 
 Random challenge data and connection IDs come from the operating system through mod-rand, which crypt-io already brings in.
 
+## 3h. HTTP/3
+
+HTTP/3 and QPACK go in an engine of their own on top of quic-net, planned in [`H3.md`](./H3.md) until the crate is named. quic-net's part is the transport; what the engine needs from it (a writable event, send order, bulk reads) is listed there and in the roadmap.
+
 ## 4. Threats
 
 | Threat | Defence |
@@ -306,3 +310,4 @@ Another way to the Initial keys, which need no handshake: crypt-io with AES-128-
 | D-029 | 2026-11-25 | 0.7 is migration: paths, path validation, the server following a client, issuing connection IDs, and a client's migration. Initiating key updates and 0-RTT move to 0.8 | a connection without a notion of the peer's address sends to a rebound client's new address without proving it, which RFC 9000 section 9 forbids; that was a gap in what 0.5 and 0.6 published. Key updates and 0-RTT do not change what 0.7 delivers |
 | D-030 | 2026-11-25 | `handle_datagram` takes the sender's address and `poll_transmit` returns the destination; the constructors take the peer's address | sans-IO still: the caller owns the socket, and the connection decides where each datagram goes. A breaking change, made at 0.x |
 | D-031 | 2026-11-25 | Challenge data and issued connection IDs come from mod-rand's operating system source; an issued ID has the length of the handshake's ID; at most 4 are active | mod-rand is first-party and already in the tree through crypt-io; a fixed length keeps short-header parsing working for every ID of the connection; 4 is enough to migrate and keep spares without holding many |
+| D-032 | 2026-11-25 | HTTP/3 and QPACK are planned as an engine of their own (`H3.md`), depending on quic-net, h2-net (Huffman and the bounded field list), and http-net (the request types and the strict mapping), not as a part of quic-net | QUIC is a transport other protocols use too; HTTP/3 shares semantics with HTTP/1.1 and HTTP/2, so it maps through the same rules, and QPACK reuses HPACK's Huffman table, which h2-net already has. The name is James's call |
