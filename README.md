@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>.
     </p>
     <blockquote>
-        <strong>Status: <code>0.4.0</code>, the wire layer, packet protection, and streams.</strong> Packet headers, version negotiation, every transport frame, transport parameters, and connection IDs with stateless reset tokens, all without I/O. Header and packet protection, the Initial key schedule, the AEAD limits, and the Retry integrity tag, over key traits a TLS session implements. Streams with reassembly, flow control both ways, stream limits, loss and retransmission, and CRYPTO reassembly. The handshake and the connection API follow (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>).
+        <strong>Status: <code>0.5.0</code>, a working connection.</strong> A client and a server handshake through tls-net and carry streams, sans-IO: the caller owns the socket and the clock. Packet headers, version negotiation, every transport frame, transport parameters, and connection IDs with stateless reset tokens, all without I/O. Header and packet protection, the Initial key schedule, the AEAD limits, and the Retry integrity tag, over key traits a TLS session implements. Streams with reassembly, flow control both ways, stream limits, loss and retransmission, and CRYPTO reassembly. Address validation tokens and the amplification limit. Congestion control, migration, and 0-RTT follow (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>).
     </blockquote>
 </div>
 

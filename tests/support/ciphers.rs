@@ -84,9 +84,10 @@ impl PacketKey for Key {
         &self,
         pn: u64,
         header: &[u8],
-        payload: &mut [u8],
-        tag: &[u8; 16],
-    ) -> Result<(), CryptoError> {
+        payload_and_tag: &mut [u8],
+    ) -> Result<usize, CryptoError> {
+        let at = payload_and_tag.len().checked_sub(16).ok_or(CryptoError)?;
+        let (payload, tag) = payload_and_tag.split_at_mut(at);
         let n = quic_net::nonce(&self.iv, pn);
         let nonce = Nonce::from_slice(&n);
         let tag = Tag::from_slice(tag);
@@ -94,7 +95,8 @@ impl PacketKey for Key {
             Aead::Aes(a) => a.decrypt_in_place_detached(nonce, header, payload, tag),
             Aead::ChaCha(a) => a.decrypt_in_place_detached(nonce, header, payload, tag),
         }
-        .map_err(|_| CryptoError)
+        .map_err(|_| CryptoError)?;
+        Ok(at)
     }
 
     fn limits(&self) -> AeadLimits {

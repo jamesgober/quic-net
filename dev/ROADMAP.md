@@ -31,14 +31,17 @@
 - [x] An end-to-end test over a hostile channel; fuzz target `streams`; benchmarks.
 - Moved to 0.5, with the reason in PLAN D-013: the connection API, keys from tls-net, the handshake, and address validation.
 
-## v0.5.0 - Design lock and handshake
-- [ ] Connection, stream, and configuration APIs (moved from 0.3, D-012, and 0.4, D-013).
-- [ ] Keys from tls-net's QUIC interface behind `PacketKey` and `HeaderKey` (PLAN section 5).
-- [ ] The handshake.
+## v0.5.0 - Design lock and handshake (2026-11-25)
+- [x] Connection, stream, and configuration APIs (moved from 0.3, D-012, and 0.4, D-013; D-021).
+- [x] Keys from tls-net 0.11's QUIC interface behind `PacketKey` and `HeaderKey` (D-017, D-022).
+- [x] The handshake, with RFC 9002's loss detection and probe timeout; Retry; the peer's key updates (D-023 to D-025).
+- [x] Tests: handshake, stream echo, lossy channels, resumption, Retry, close, amplification; fuzz target `connection`.
 - [x] Address validation tokens (Retry and `NEW_TOKEN`) and the anti-amplification limit of a path (D-018 to D-020).
 
 ## v0.6.0 - Recovery and migration
-- [ ] Loss detection, congestion control, pacing, migration and path validation.
+- [ ] Congestion control and pacing (loss detection and the probe timeout came with 0.5).
+- [ ] Migration and path validation; issuing more connection IDs; initiating key updates.
+- [ ] 0-RTT.
 
 ## v1.0.0 - Stable
 - [ ] Frozen after an HTTP/3 engine has used it end to end.

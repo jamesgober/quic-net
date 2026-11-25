@@ -354,6 +354,12 @@ impl RecvStream {
         self.credit.update()
     }
 
+    /// The limit last advertised for this stream.
+    #[must_use]
+    pub fn limit(&self) -> u64 {
+        self.credit.max()
+    }
+
     /// Bytes read or dropped since the last call: what the connection's
     /// flow control counts as consumed ([`RecvCredit::consumed`]).
     pub fn take_consumed(&mut self) -> u64 {

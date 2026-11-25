@@ -24,6 +24,11 @@
 //! and [`Amplification`] keeps a server within three times what it
 //! received until the client's address is validated.
 //!
+//! With the `tls` feature (on by default), [`Connection`] puts it together:
+//! a client or server connection, sans-IO, whose handshake runs through
+//! tls-net. The caller passes it datagrams, sends what it produces, and
+//! runs its timers.
+//!
 //! ## Read the frames of a packet
 //!
 //! ```
@@ -65,6 +70,8 @@
 
 mod address;
 mod cid;
+#[cfg(feature = "tls")]
+mod conn;
 mod error;
 mod flow;
 mod frame;
@@ -75,6 +82,8 @@ mod ranges;
 mod recv;
 mod send;
 mod stream;
+#[cfg(feature = "tls")]
+mod tls;
 mod varint;
 
 pub use address::{Amplification, MAX_TOKEN_LEN, TokenCheck, Tokens};
@@ -82,6 +91,8 @@ pub use cid::{
     CidError, ConnectionId, LocalCids, MAX_CID_LEN, MIN_STATELESS_RESET, PeerCid, PeerCids,
     ResetKey, ResetToken, is_stateless_reset,
 };
+#[cfg(feature = "tls")]
+pub use conn::{Close, Config, ConnectError, Connection, Event, StreamError};
 pub use error::{DecodeError, TransportErrorCode};
 pub use flow::{RecvCredit, SendCredit};
 pub use frame::{
@@ -102,6 +113,8 @@ pub use protect::{
 pub use recv::{CryptoRecv, MAX_CRYPTO_BUFFER, MAX_FRAGMENTS, RecvState, RecvStream};
 pub use send::{Chunk, SendState, SendStream};
 pub use stream::{LocalStreams, RemoteStreams, StreamId};
+#[cfg(feature = "tls")]
+pub use tls::TlsRetry;
 pub use varint::{MAX_VARINT, VarInt};
 
 /// Crate version string, populated by Cargo at build time.

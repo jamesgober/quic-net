@@ -13,6 +13,29 @@ impl RangeSet {
         RangeSet { r: Vec::new() }
     }
 
+    /// The largest value in the set.
+    pub(crate) fn max(&self) -> Option<u64> {
+        self.r.last().map(|r| r.end - 1)
+    }
+
+    /// Whether `v` is in the set.
+    pub(crate) fn contains(&self, v: u64) -> bool {
+        self.covers(v..v + 1)
+    }
+
+    /// Drops the lowest ranges until at most `n` remain.
+    pub(crate) fn keep_highest(&mut self, n: usize) {
+        if self.r.len() > n {
+            let drop = self.r.len() - n;
+            self.r.drain(..drop);
+        }
+    }
+
+    /// The ranges from the highest down, as inclusive ranges.
+    pub(crate) fn iter_desc(&self) -> impl Iterator<Item = core::ops::RangeInclusive<u64>> + '_ {
+        self.r.iter().rev().map(|r| r.start..=r.end - 1)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.r.is_empty()
     }
