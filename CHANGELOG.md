@@ -11,6 +11,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Tokens` and `TokenCheck`: Retry and `NEW_TOKEN` address validation
+  tokens, sealed with XChaCha20-Poly1305 through crypt-io, bound to the
+  client's address (and port, for Retry), with lifetimes and key rotation.
+- `Amplification`: the anti-amplification limit of one path.
+- A `tokens` fuzz target; token costs in `benches/codec.rs`.
+
+### Changed
+
+- crypt-io's `aead-chacha20` feature, for the tokens.
+
 ---
 
 ## [0.4.0] - 2026-11-20

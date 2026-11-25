@@ -19,6 +19,11 @@
 //! size, and reset, [`SendStream`] for buffering, loss, and retransmission,
 //! and [`CryptoRecv`] for the handshake's CRYPTO data.
 //!
+//! Address validation (RFC 9000 section 8): [`Tokens`] issues and checks
+//! Retry and `NEW_TOKEN` tokens, sealed with crypt-io's XChaCha20-Poly1305,
+//! and [`Amplification`] keeps a server within three times what it
+//! received until the client's address is validated.
+//!
 //! ## Read the frames of a packet
 //!
 //! ```
@@ -58,6 +63,7 @@
     )
 )]
 
+mod address;
 mod cid;
 mod error;
 mod flow;
@@ -71,6 +77,7 @@ mod send;
 mod stream;
 mod varint;
 
+pub use address::{Amplification, MAX_TOKEN_LEN, TokenCheck, Tokens};
 pub use cid::{
     CidError, ConnectionId, LocalCids, MAX_CID_LEN, MIN_STATELESS_RESET, PeerCid, PeerCids,
     ResetKey, ResetToken, is_stateless_reset,
