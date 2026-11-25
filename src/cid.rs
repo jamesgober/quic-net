@@ -365,6 +365,34 @@ impl PeerCids {
         self.pending_retire.retain(|&s| s != sequence);
     }
 
+    /// The sequence numbers to send `RETIRE_CONNECTION_ID` for, oldest
+    /// first.
+    #[must_use]
+    pub fn pending_retirements(&self) -> &[u64] {
+        &self.pending_retire
+    }
+
+    /// Stops using `sequence` on our own initiative (a migration moves to a
+    /// fresh ID): it leaves the active set and is queued for retirement.
+    pub fn retire(&mut self, sequence: u64) {
+        if self.active.remove(&sequence).is_some() && !self.pending_retire.contains(&sequence) {
+            self.pending_retire.push(sequence);
+        }
+    }
+
+    /// The active ID with the lowest sequence number after `sequence`: the
+    /// next one to move to.
+    #[must_use]
+    pub fn next_after(&self, sequence: u64) -> Option<PeerCid> {
+        self.active.range(sequence + 1..).next().map(|(_, c)| *c)
+    }
+
+    /// The active ID with `sequence`, if it is still active.
+    #[must_use]
+    pub fn get(&self, sequence: u64) -> Option<PeerCid> {
+        self.active.get(&sequence).copied()
+    }
+
     /// The IDs we may use, lowest sequence first.
     pub fn active(&self) -> impl Iterator<Item = &PeerCid> {
         self.active.values()

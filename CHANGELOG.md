@@ -13,6 +13,43 @@
 
 ---
 
+## [0.7.0] - 2026-11-25
+
+Migration.
+
+### Added
+
+- Paths (RFC 9000 sections 8 and 9): the connection knows the peer's
+  address. A server follows a client whose non-probing packet with the
+  largest packet number comes from a new address, sends there within
+  three times what it receives until the address answers a
+  `PATH_CHALLENGE`, and returns to the previous path if it never does. A
+  new IP address resets the congestion state; a port change alone (NAT
+  rebinding) keeps it. A `PATH_CHALLENGE` from another address is answered
+  there, in a datagram of its own.
+- Connection IDs issued to the peer, up to its limit (at most 4 active),
+  and replaced when it retires one; `Event::LocalCidIssued` and
+  `Event::LocalCidRetired` for routing.
+- `Connection::migrate` and `MigrateError`: a client that changed its
+  socket moves to a fresh connection ID of the server's and proves the new
+  path.
+- `Event::PathChanged`.
+- Tests: NAT rebinding during a transfer, a client's migration to a new
+  network, a packet replayed from another address moving nothing, a brief
+  rebinding that returns, the server issuing IDs; the `connection` fuzz
+  target delivers datagrams from another address too.
+
+### Changed
+
+- `handle_datagram` takes the sender's address; `poll_transmit` returns
+  the address to send to (`Option<SocketAddr>`); `Connection::client` takes
+  the server's address and `Connection::server` the client's.
+
+### Fixed
+
+- A path challenge's resend timer stayed set after the challenge was
+  answered, so `poll_timeout` kept reporting a time already past.
+
 ## [0.6.0] - 2026-11-25
 
 Congestion control.

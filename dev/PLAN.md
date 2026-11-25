@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `quic-net`. A living document: every design decision, idea, or open question about quic-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** `0.6.0`: a working connection with congestion control (0.5, 0.6) over everything below. `0.4.0`: the sans-IO wire layer (0.2), packet protection over key traits (0.3), and streams with flow control (0.4). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
+> **Status:** `0.7.0`: a working connection with congestion control and migration (0.5 to 0.7) over everything below. `0.4.0`: the sans-IO wire layer (0.2), packet protection over key traits (0.3), and streams with flow control (0.4). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
 
 ---
 
@@ -163,6 +163,19 @@ Persistent congestion is judged on one batch of losses at a time: the first and 
 
 Cost, an estimate not yet benchmarked: a few integer operations per packet sent, acknowledged, or lost, and a few floating point ones per datagram for the pacer.
 
+## 3g. Design of migration (0.7)
+
+RFC 9000 sections 8 and 9. The connection now knows the peer's address: `handle_datagram` takes where a datagram came from, and `poll_transmit` says where to send.
+
+- **A path** is the peer's address, its amplification limit (until the address is proved), and a path challenge in progress. A client hears only from the server it chose.
+- **The server follows** a client whose non-probing packet with the largest packet number comes from a new address (section 9.3). It sends there at once, within three times what it receives from that address, challenges it, and keeps the previous validated path until the challenge is answered; if it is not answered within three probe timeouts (at least three initial RTTs), the server returns to the previous path, or ends the connection when there is none. A packet replayed from another address carries a packet number already seen, so it moves nothing.
+- **Congestion**: a new IP address resets the controller and the pacer (section 9.4); a port change alone, the usual NAT rebinding, keeps them.
+- **Probing**: a `PATH_CHALLENGE` from an address other than the path's is answered there, in a datagram of its own, within three times the datagram that asked (section 8.2.2). Datagrams carrying a challenge are padded to 1,200 bytes when the limit allows.
+- **Connection IDs**: once the handshake completes, each side issues IDs up to the peer's `active_connection_id_limit` (at most 4 active), with stateless reset tokens from the configured reset key (or a random one per connection), and replaces each the peer retires. The caller learns of them through `LocalCidIssued` and `LocalCidRetired`, to route datagrams.
+- **A client's migration** (`migrate`): after its socket changed, the client moves to a fresh connection ID of the server's, retires the old one, resets its congestion state, and challenges the path. It is refused before the handshake is confirmed, when the server set `disable_active_migration`, or without a spare ID.
+
+Random challenge data and connection IDs come from the operating system through mod-rand, which crypt-io already brings in.
+
 ## 4. Threats
 
 | Threat | Defence |
@@ -189,6 +202,9 @@ Cost, an estimate not yet benchmarked: a few integer operations per packet sent,
 | forged packets wearing down the AEAD | every packet that fails to open counts toward the integrity limit; at the limit, `AEAD_LIMIT_REACHED` | one counter |
 | a stale peer configuration on resumption | the client ignores the previous session's transport parameters and waits for the server's new ones | none |
 | a peer slowing its ACKs to make this endpoint flood a path | the window grows only on acknowledged bytes, and losses halve it; pacing spreads each window over the round trip | none beyond the bookkeeping |
+| redirecting a connection with spoofed source addresses | the server moves only on a non-probing packet with a new largest packet number, which an off-path attacker cannot make; sends to the new address within three times what it received from it until a path challenge is answered; returns to the previous path if it is not | one challenge per migration |
+| linking a client's paths | a migrating client moves to a fresh connection ID and retires the old one | none |
+| replaying a packet from another address | a duplicate packet number moves nothing | none |
 | stateless reset forgery or probing | tokens are keyed BLAKE3 of the ID under a secret key; comparisons in constant time; datagrams under 21 bytes are never resets | one BLAKE3 per issued ID; 16 XORs per token checked |
 
 ## 5. Prerequisites
@@ -287,3 +303,6 @@ Another way to the Initial keys, which need no handshake: crypt-io with AES-128-
 | D-026 | 2026-11-25 | 0.6 is congestion control and pacing; migration, more connection IDs, initiating key updates, and 0-RTT move to 0.7 | congestion control is what a public crate needed next: without it a sender is limited only by flow control. Migration and 0-RTT are their own designs and do not change what 0.6 delivers |
 | D-027 | 2026-11-25 | NewReno, the controller RFC 9002 specifies, behind a small internal interface (sent, acknowledged, lost, discarded, persistent congestion) | it is the one the RFC describes in full, so it can be checked against the text; the interface leaves room for CUBIC or BBR later without touching the connection |
 | D-028 | 2026-11-25 | The pacer accepts a budget within one byte of a datagram and never waits less than 1 us | its refill is floating point; a timer set to the exact moment could find the budget a hair short and wait zero nanoseconds, so a caller woken at that time would spin without sending |
+| D-029 | 2026-11-25 | 0.7 is migration: paths, path validation, the server following a client, issuing connection IDs, and a client's migration. Initiating key updates and 0-RTT move to 0.8 | a connection without a notion of the peer's address sends to a rebound client's new address without proving it, which RFC 9000 section 9 forbids; that was a gap in what 0.5 and 0.6 published. Key updates and 0-RTT do not change what 0.7 delivers |
+| D-030 | 2026-11-25 | `handle_datagram` takes the sender's address and `poll_transmit` returns the destination; the constructors take the peer's address | sans-IO still: the caller owns the socket, and the connection decides where each datagram goes. A breaking change, made at 0.x |
+| D-031 | 2026-11-25 | Challenge data and issued connection IDs come from mod-rand's operating system source; an issued ID has the length of the handshake's ID; at most 4 are active | mod-rand is first-party and already in the tree through crypt-io; a fixed length keeps short-header parsing working for every ID of the connection; 4 is enough to migrate and keep spares without holding many |

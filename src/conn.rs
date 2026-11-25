@@ -16,6 +16,7 @@
 //! followed).
 
 use core::fmt;
+use core::net::SocketAddr;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -24,7 +25,7 @@ use tls_net::{TlsClient, TlsServer};
 
 use crate::address::Amplification;
 use crate::cc::{CongestionState, NewReno, Pacer};
-use crate::cid::{ConnectionId, PeerCids, ResetKey, ResetToken, is_stateless_reset};
+use crate::cid::{ConnectionId, LocalCids, PeerCids, ResetKey, ResetToken, is_stateless_reset};
 use crate::error::TransportErrorCode;
 use crate::flow::{RecvCredit, SendCredit};
 use crate::frame::{Ack, Frame, PacketKind, frames};
@@ -162,9 +163,41 @@ pub enum Event {
     },
     /// The server sent a token for the next connection (`NEW_TOKEN`).
     NewToken(Vec<u8>),
+    /// The peer moved to this address, and the connection follows it once
+    /// the address answers a path challenge (RFC 9000 section 9).
+    PathChanged(SocketAddr),
+    /// A new connection ID of ours, issued to the peer: route datagrams for
+    /// it to this connection.
+    LocalCidIssued(ConnectionId),
+    /// The peer retired one of our connection IDs: stop routing it here.
+    LocalCidRetired(ConnectionId),
     /// The connection ended.
     Closed(Close),
 }
+
+/// Why [`Connection::migrate`] cannot move now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MigrateError {
+    /// Only a client migrates, once the handshake is confirmed.
+    NotNow,
+    /// The server asked clients not to migrate
+    /// (`disable_active_migration`).
+    Disabled,
+    /// The server has given no spare connection ID to move to.
+    NoConnectionId,
+}
+
+impl fmt::Display for MigrateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            MigrateError::NotNow => "only a client with a confirmed handshake migrates",
+            MigrateError::Disabled => "the server disabled active migration",
+            MigrateError::NoConnectionId => "the server gave no spare connection ID",
+        })
+    }
+}
+
+impl std::error::Error for MigrateError {}
 
 /// What an operation on a stream ran into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +242,8 @@ enum Sent {
     MaxStreams(bool),
     ResetStream(StreamId),
     StopSending(StreamId, u64),
+    NewConnectionId(u64, ConnectionId, ResetToken),
+    RetireConnectionId(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -262,6 +297,38 @@ impl Space {
     fn ack_eliciting_in_flight(&self) -> bool {
         self.sent.values().any(|p| p.ack_eliciting)
     }
+}
+
+/// A network path: the peer's address, the amplification limit until the
+/// address is proved, and a path challenge in progress.
+struct Path {
+    remote: SocketAddr,
+    amplification: Amplification,
+    /// The data of the challenge sent, waiting for its response.
+    challenge: Option<[u8; 8]>,
+    /// A challenge (new or again) waits to be sent.
+    challenge_pending: bool,
+    challenge_sent: Option<Instant>,
+    /// When validation gives up.
+    deadline: Option<Instant>,
+}
+
+impl Path {
+    fn new(remote: SocketAddr) -> Path {
+        Path {
+            remote,
+            amplification: Amplification::new(),
+            challenge: None,
+            challenge_pending: false,
+            challenge_sent: None,
+            deadline: None,
+        }
+    }
+}
+
+/// Random bytes from the operating system.
+fn random(out: &mut [u8]) -> Result<(), TransportErrorCode> {
+    mod_rand::tier3::fill_bytes(out).map_err(|_| TransportErrorCode::INTERNAL_ERROR)
 }
 
 #[derive(Default)]
@@ -361,8 +428,26 @@ pub struct Connection {
     heard: bool,
     peer_params: Option<TransportParameters>,
     peer_cids: Option<PeerCids>,
+    /// The sequence number of the peer's ID we send to.
+    peer_cid_seq: u64,
     peer_reset: Option<ResetToken>,
-    amplification: Amplification,
+    /// Our IDs issued to the peer.
+    local_cids: LocalCids,
+    reset_key: std::sync::Arc<ResetKey>,
+    /// NEW_CONNECTION_ID frames to send.
+    new_cids_pending: Vec<(u64, ConnectionId, ResetToken)>,
+    /// RETIRE_CONNECTION_ID frames to send.
+    retire_pending: Vec<u64>,
+    /// The path packets go on.
+    path: Path,
+    /// The validated path before a migration, until the new one is proved.
+    prev_path: Option<Path>,
+    /// PATH_RESPONSEs owed to other addresses: where, the data, and the
+    /// length of the datagram that asked (the response stays within three
+    /// times it).
+    off_path: VecDeque<(SocketAddr, [u8; 8], usize)>,
+    /// The datagram being handled: where it came from, and its length.
+    datagram: Option<(SocketAddr, usize)>,
     rtt: Rtt,
     cc: NewReno,
     pacer: Pacer,
@@ -394,11 +479,18 @@ pub struct Connection {
     max_streams_pending: [bool; 2],
     resets_pending: BTreeMap<StreamId, (u64, u64)>,
     stops_pending: BTreeMap<StreamId, u64>,
+    /// PATH_RESPONSEs owed on the current path.
     path_responses: Vec<[u8; 8]>,
     /// Round robin over streams with data to send.
     next_stream: Option<StreamId>,
     /// The datagram being built may carry ACKs only.
     ack_only: bool,
+    /// The packet being built carries exactly these frames.
+    explicit: Option<Vec<u8>>,
+    /// The destination ID of the short header packet being handled.
+    packet_dcid: Option<ConnectionId>,
+    /// The time of the last poll, for marking frames sent.
+    now_hint: Instant,
 }
 
 impl fmt::Debug for Connection {
@@ -437,6 +529,7 @@ impl Connection {
     pub fn client(
         tls: &TlsClient,
         server_name: &str,
+        server: SocketAddr,
         config: Config,
         local_cid: ConnectionId,
         initial_dcid: ConnectionId,
@@ -459,10 +552,11 @@ impl Connection {
             local_cid,
             initial_dcid,
             initial_dcid,
+            server,
             now,
-        );
+        )?;
         install(&mut c.spaces[0], initial_keys(&initial_dcid, Side::Client)?);
-        c.amplification = Amplification::validated();
+        c.path.amplification = Amplification::validated();
         c.pump_tls();
         Ok(c)
     }
@@ -474,16 +568,26 @@ impl Connection {
     /// # Errors
     ///
     /// As [`client`](Self::client).
+    #[allow(clippy::too_many_arguments)]
     pub fn client_with_token(
         tls: &TlsClient,
         server_name: &str,
+        server: SocketAddr,
         config: Config,
         local_cid: ConnectionId,
         initial_dcid: ConnectionId,
         token: Vec<u8>,
         now: Instant,
     ) -> Result<Connection, ConnectError> {
-        let mut c = Connection::client(tls, server_name, config, local_cid, initial_dcid, now)?;
+        let mut c = Connection::client(
+            tls,
+            server_name,
+            server,
+            config,
+            local_cid,
+            initial_dcid,
+            now,
+        )?;
         c.token = token;
         Ok(c)
     }
@@ -505,6 +609,7 @@ impl Connection {
     #[allow(clippy::too_many_arguments)]
     pub fn server(
         tls: &TlsServer,
+        client: SocketAddr,
         config: Config,
         local_cid: ConnectionId,
         client_dcid: ConnectionId,
@@ -532,16 +637,18 @@ impl Connection {
             local_cid,
             client_scid,
             original_dcid,
+            client,
             now,
-        );
+        )?;
         c.retry_scid = retry_scid;
         install(&mut c.spaces[0], initial_keys(&client_dcid, Side::Server)?);
         if validated {
-            c.amplification.validate();
+            c.path.amplification.validate();
         }
         Ok(c)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         side: Side,
         tls: QuicSession,
@@ -549,8 +656,9 @@ impl Connection {
         local_cid: ConnectionId,
         remote_cid: ConnectionId,
         original_dcid: ConnectionId,
+        remote: SocketAddr,
         now: Instant,
-    ) -> Connection {
+    ) -> Result<Connection, ConnectError> {
         let p = &config.params;
         let (remote_bidi, remote_uni) = (
             RemoteStreams::new(p.initial_max_streams_bidi),
@@ -558,7 +666,17 @@ impl Connection {
         );
         let conn_recv = RecvCredit::new(p.initial_max_data);
         let idle_timeout = p.max_idle_timeout;
-        Connection {
+        let reset_key = match &config.reset_key {
+            Some(k) => std::sync::Arc::clone(k),
+            None => {
+                let mut k = [0u8; 32];
+                random(&mut k).map_err(|_| ConnectError::Keys)?;
+                let key = ResetKey::new(k);
+                k.fill(0);
+                std::sync::Arc::new(key)
+            }
+        };
+        Ok(Connection {
             side,
             state: State::Handshake,
             tls,
@@ -574,8 +692,16 @@ impl Connection {
             heard: false,
             peer_params: None,
             peer_cids: None,
+            peer_cid_seq: 0,
             peer_reset: None,
-            amplification: Amplification::new(),
+            local_cids: LocalCids::new(local_cid),
+            reset_key,
+            new_cids_pending: Vec::new(),
+            retire_pending: Vec::new(),
+            path: Path::new(remote),
+            prev_path: None,
+            off_path: VecDeque::new(),
+            datagram: None,
             rtt: Rtt::new(),
             cc: NewReno::new(MIN_INITIAL_SIZE),
             pacer: Pacer::new(),
@@ -606,8 +732,11 @@ impl Connection {
             path_responses: Vec::new(),
             next_stream: None,
             ack_only: false,
+            explicit: None,
+            packet_dcid: None,
+            now_hint: now,
             config,
-        }
+        })
     }
 
     /// Which end this is.
@@ -745,6 +874,9 @@ impl Connection {
                 self.handshake_done_pending = true;
                 self.confirm();
             }
+            if let Err(code) = self.issue_cids() {
+                self.close_error(code, b"connection IDs");
+            }
         }
     }
 
@@ -808,10 +940,12 @@ impl Connection {
         self.conn_send = SendCredit::new(p.initial_max_data);
         self.local_bidi = LocalStreams::new(p.initial_max_streams_bidi);
         self.local_uni = LocalStreams::new(p.initial_max_streams_uni);
-        self.peer_cids = Some(PeerCids::new(
-            self.remote_cid,
-            ours.active_connection_id_limit.max(2),
-        ));
+        let mut peer_cids = PeerCids::new(self.remote_cid, ours.active_connection_id_limit.max(2));
+        if let Some(t) = p.stateless_reset_token {
+            peer_cids.set_initial_token(t);
+        }
+        self.peer_cids = Some(peer_cids);
+        self.local_cids.set_peer_limit(p.active_connection_id_limit);
         self.peer_params = Some(p);
         Ok(())
     }
@@ -819,7 +953,7 @@ impl Connection {
     // ---- Receiving --------------------------------------------------------
 
     /// A datagram from the peer, decrypted in place.
-    pub fn handle_datagram(&mut self, now: Instant, data: &mut [u8]) {
+    pub fn handle_datagram(&mut self, now: Instant, from: SocketAddr, data: &mut [u8]) {
         match self.state {
             State::Closed | State::Draining => return,
             State::Closing => {
@@ -829,7 +963,15 @@ impl Connection {
             }
             _ => {}
         }
-        self.amplification.on_received(data.len());
+        if from == self.path.remote {
+            self.path.amplification.on_received(data.len());
+        } else if self.side == Side::Client {
+            // A client hears only from the server it chose.
+            return;
+        } else if let Some(prev) = self.prev_path.as_mut().filter(|p| p.remote == from) {
+            prev.amplification.on_received(data.len());
+        }
+        self.datagram = Some((from, data.len()));
         let spans: Vec<(usize, usize, usize, Owned)> = coalesced(data, self.local_cid.len())
             .filter_map(Result::ok)
             .map(|p| {
@@ -910,7 +1052,8 @@ impl Connection {
                 (Level::Initial, PacketKind::Initial)
             }
             Owned::Handshake => (Level::Handshake, PacketKind::Handshake),
-            Owned::Short => {
+            Owned::Short { dcid } => {
+                self.packet_dcid = Some(dcid);
                 if self.side == Side::Server && self.tls.is_handshaking() {
                     // RFC 9001 section 5.7: no 1-RTT before the client is
                     // authenticated.
@@ -959,9 +1102,17 @@ impl Connection {
         self.last_activity = now;
         let payload = packet[range].to_vec();
         let mut ack_eliciting = false;
+        let mut probing_only = true;
         for f in frames(&payload, kind) {
             let f = f.map_err(|e| e.code())?;
             ack_eliciting |= f.is_ack_eliciting();
+            probing_only &= matches!(
+                f,
+                Frame::Padding { .. }
+                    | Frame::PathChallenge(_)
+                    | Frame::PathResponse(_)
+                    | Frame::NewConnectionId { .. }
+            );
             self.handle_frame(now, level, f)?;
             if matches!(self.state, State::Closed | State::Draining) {
                 return Ok(());
@@ -976,10 +1127,25 @@ impl Connection {
         if ack_eliciting {
             s.unacked += 1;
         }
+        let largest = s.received.max() == Some(pn);
+        if let Some((from, _)) = self.datagram {
+            // RFC 9000 section 9.3: the server follows a client whose
+            // non-probing packet with the largest packet number comes from a
+            // new address.
+            if self.side == Side::Server
+                && level == Level::Data
+                && from != self.path.remote
+                && largest
+                && !probing_only
+                && self.state == State::Established
+            {
+                self.on_peer_migrated(now, from)?;
+            }
+        }
         if self.side == Side::Server && level == Level::Handshake {
             // A Handshake packet proves the client's address, and the
             // server's Initial keys go (RFC 9001 section 4.9.1).
-            self.amplification.validate();
+            self.path.amplification.validate();
             self.discard(Level::Initial);
         }
         Ok(())
@@ -1198,19 +1364,152 @@ impl Connection {
                     return Err(TransportErrorCode::PROTOCOL_VIOLATION);
                 }
                 if let Some(p) = self.peer_cids.as_mut() {
-                    // The IDs retired here are not used yet: this version
-                    // sends to the first ID only.
-                    let _ = p.on_new_connection_id(sequence, retire_prior_to, cid, reset_token)?;
+                    p.on_new_connection_id(sequence, retire_prior_to, cid, reset_token)?;
+                    // The ID in use was retired: move to the next one.
+                    if p.get(self.peer_cid_seq).is_none() {
+                        if let Some(next) = p.next_after(self.peer_cid_seq) {
+                            self.peer_cid_seq = next.sequence;
+                            self.remote_cid = next.cid;
+                            self.peer_reset = next.reset_token;
+                        }
+                    }
                 }
             }
-            Frame::RetireConnectionId { .. } => {}
-            Frame::PathChallenge(data) => {
-                // Answered with PATH_RESPONSE on the next packet; this
-                // version keeps one path, so the answer is immediate.
-                self.path_responses.push(data);
+            Frame::RetireConnectionId { sequence } => {
+                let dcid = self.packet_dcid.unwrap_or(self.local_cid);
+                if let Some(cid) = self.local_cids.on_retire(sequence, &dcid)? {
+                    self.events.push_back(Event::LocalCidRetired(cid));
+                    self.issue_cids()?;
+                }
             }
-            Frame::PathResponse(_) => {}
+            Frame::PathChallenge(data) => {
+                // RFC 9000 section 8.2.2: answered on the path it came on.
+                match self.datagram {
+                    Some((from, len)) if from != self.path.remote => {
+                        if self.off_path.len() < 4 {
+                            self.off_path.push_back((from, data, len));
+                        }
+                    }
+                    _ => {
+                        if self.path_responses.len() < 4 {
+                            self.path_responses.push(data);
+                        }
+                    }
+                }
+            }
+            Frame::PathResponse(data) => {
+                if self.path.challenge == Some(data) {
+                    self.path.challenge = None;
+                    self.path.challenge_pending = false;
+                    self.path.challenge_sent = None;
+                    self.path.deadline = None;
+                    self.path.amplification.validate();
+                    self.prev_path = None;
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// The client's address changed (RFC 9000 section 9.3): the server
+    /// sends there, within three times what it receives from it, and proves
+    /// the address with a path challenge. A failed challenge returns to the
+    /// previous path.
+    fn on_peer_migrated(
+        &mut self,
+        now: Instant,
+        from: SocketAddr,
+    ) -> Result<(), TransportErrorCode> {
+        let mut new = Path::new(from);
+        if let Some((_, len)) = self.datagram {
+            new.amplification.on_received(len);
+        }
+        let ip_changed = from.ip() != self.path.remote.ip();
+        let old = core::mem::replace(&mut self.path, new);
+        if old.amplification.is_validated() {
+            self.prev_path = Some(old);
+        }
+        self.start_challenge(now);
+        if ip_changed {
+            // A new network: the congestion state of the old one says
+            // nothing about it (section 9.4). A port change alone (NAT
+            // rebinding) keeps it.
+            self.cc = NewReno::new(MIN_INITIAL_SIZE);
+            self.pacer = Pacer::new();
+        }
+        self.events.push_back(Event::PathChanged(from));
+        Ok(())
+    }
+
+    fn start_challenge(&mut self, now: Instant) {
+        self.path.challenge = None;
+        self.path.challenge_pending = true;
+        self.path.challenge_sent = None;
+        // Section 8.2.4: three probe timeouts, and at least the initial
+        // RTT's worth.
+        let wait = (self.rtt.pto() * 3).max(INITIAL_RTT * 3);
+        self.path.deadline = Some(now + wait);
+    }
+
+    /// Issues our connection IDs up to the peer's limit (at most 4 active),
+    /// for it to move to when it migrates.
+    fn issue_cids(&mut self) -> Result<(), TransportErrorCode> {
+        let len = self.local_cid.len();
+        if len == 0 || self.state != State::Established {
+            return Ok(());
+        }
+        let limit = self
+            .peer_params
+            .as_ref()
+            .map_or(2, |p| p.active_connection_id_limit)
+            .clamp(2, 4);
+        while (self.local_cids.active_count() as u64) < limit {
+            let mut bytes = [0u8; 20];
+            random(&mut bytes[..len])?;
+            let Ok(cid) = ConnectionId::new(&bytes[..len]) else {
+                break;
+            };
+            let Some(issued) = self.local_cids.issue(cid, &self.reset_key) else {
+                break;
+            };
+            self.new_cids_pending.push(issued);
+            self.events.push_back(Event::LocalCidIssued(cid));
+        }
+        Ok(())
+    }
+
+    /// The client moved to a new local address (its socket changed): it
+    /// sends from there to a fresh connection ID of the server's, so the two
+    /// paths cannot be linked by an observer, and proves the path with a
+    /// challenge (RFC 9000 section 9.2). Call it after the socket changed.
+    ///
+    /// # Errors
+    ///
+    /// [`MigrateError`] when the connection is not a client with a
+    /// confirmed handshake, the server disabled migration, or it gave no
+    /// spare connection ID.
+    pub fn migrate(&mut self, now: Instant) -> Result<(), MigrateError> {
+        if self.side != Side::Client || self.state != State::Established || !self.confirmed {
+            return Err(MigrateError::NotNow);
+        }
+        if self
+            .peer_params
+            .as_ref()
+            .is_some_and(|p| p.disable_active_migration)
+        {
+            return Err(MigrateError::Disabled);
+        }
+        let peer = self.peer_cids.as_mut().ok_or(MigrateError::NotNow)?;
+        let next = peer
+            .next_after(self.peer_cid_seq)
+            .ok_or(MigrateError::NoConnectionId)?;
+        peer.retire(self.peer_cid_seq);
+        self.peer_cid_seq = next.sequence;
+        self.remote_cid = next.cid;
+        self.peer_reset = next.reset_token;
+        self.cc = NewReno::new(MIN_INITIAL_SIZE);
+        self.pacer = Pacer::new();
+        self.start_challenge(now);
         Ok(())
     }
 
@@ -1365,6 +1664,11 @@ impl Connection {
                 }
                 self.collect(id);
             }
+            Sent::RetireConnectionId(seq) => {
+                if let Some(p) = self.peer_cids.as_mut() {
+                    p.retirement_sent(seq);
+                }
+            }
             _ => {}
         }
     }
@@ -1447,6 +1751,12 @@ impl Connection {
                 Sent::StopSending(id, code) => {
                     self.stops_pending.insert(id, code);
                 }
+                Sent::NewConnectionId(seq, cid, token) => {
+                    if self.local_cids.contains(&cid) {
+                        self.new_cids_pending.push((seq, cid, token));
+                    }
+                }
+                Sent::RetireConnectionId(seq) => self.retire_pending.push(seq),
             }
         }
     }
@@ -1477,6 +1787,11 @@ impl Connection {
         earliest(self.loss_or_pto().map(|(at, _, _)| at));
         earliest(self.ack_deadline());
         earliest(self.next_send);
+        earliest(self.path.deadline);
+        // The challenge's resend timer counts only while it is outstanding.
+        if self.path.challenge.is_some() {
+            earliest(self.path.challenge_sent.map(|t| t + self.rtt.pto()));
+        }
         t
     }
 
@@ -1554,6 +1869,30 @@ impl Connection {
     pub fn handle_timeout(&mut self, now: Instant) {
         if self.state == State::Closed {
             return;
+        }
+        if self.path.deadline.is_some_and(|t| now >= t) {
+            // The new path never answered (RFC 9000 section 9.3.2): back to
+            // the previous one, or the connection ends.
+            match self.prev_path.take() {
+                Some(prev) => self.path = prev,
+                None => {
+                    self.enter_closed(Close {
+                        code: 0,
+                        application: false,
+                        reason: b"path validation failed".to_vec(),
+                        remote: false,
+                    });
+                    return;
+                }
+            }
+        } else if self.path.challenge.is_some()
+            && self
+                .path
+                .challenge_sent
+                .is_some_and(|t| now >= t + self.rtt.pto())
+        {
+            // The challenge goes again, with new data.
+            self.path.challenge_pending = true;
         }
         if self.next_send.is_some_and(|t| now >= t) {
             // Pacing allows the next packet; poll_transmit sets a new time
@@ -1694,6 +2033,13 @@ impl Connection {
             || !self.resets_pending.is_empty()
             || !self.stops_pending.is_empty()
             || !self.path_responses.is_empty()
+            || self.path.challenge_pending
+            || !self.new_cids_pending.is_empty()
+            || !self.retire_pending.is_empty()
+            || self
+                .peer_cids
+                .as_ref()
+                .is_some_and(|p| !p.pending_retirements().is_empty())
             || (self.conn_send.available() > 0
                 && self
                     .streams
@@ -1709,7 +2055,35 @@ impl Connection {
     /// Writes the next datagram into `out` (cleared first): coalesced
     /// Initial, Handshake, and 1-RTT packets as needed. `false` when there
     /// is nothing to send now.
-    pub fn poll_transmit(&mut self, now: Instant, out: &mut Vec<u8>) -> bool {
+    pub fn poll_transmit(&mut self, now: Instant, out: &mut Vec<u8>) -> Option<SocketAddr> {
+        self.now_hint = now;
+        if let Some(to) = self.transmit_off_path(now, out) {
+            return Some(to);
+        }
+        self.transmit(now, out).then_some(self.path.remote)
+    }
+
+    /// A PATH_RESPONSE owed to another address, in a datagram of its own
+    /// sent there, within three times the datagram that asked (RFC 9000
+    /// section 8.2.2).
+    fn transmit_off_path(&mut self, now: Instant, out: &mut Vec<u8>) -> Option<SocketAddr> {
+        out.clear();
+        if self.state != State::Established {
+            self.off_path.clear();
+            return None;
+        }
+        let (to, data, asked) = self.off_path.pop_front()?;
+        let mut frame = Vec::with_capacity(9);
+        Frame::PathResponse(data).encode(&mut frame);
+        self.explicit = Some(frame);
+        let room = (asked * 3).min(self.max_datagram());
+        let min_len = MIN_INITIAL_SIZE.min(room);
+        let written = self.write_packet(now, Level::Data, out, room, min_len);
+        self.explicit = None;
+        written.then_some(to)
+    }
+
+    fn transmit(&mut self, now: Instant, out: &mut Vec<u8>) -> bool {
         out.clear();
         if matches!(self.state, State::Closed | State::Draining) {
             return false;
@@ -1718,9 +2092,9 @@ impl Connection {
             return false;
         }
         let mut budget = self.max_datagram();
-        if !self.amplification.is_validated() {
-            budget =
-                budget.min(usize::try_from(self.amplification.allowance()).unwrap_or(usize::MAX));
+        if !self.path.amplification.is_validated() {
+            budget = budget
+                .min(usize::try_from(self.path.amplification.allowance()).unwrap_or(usize::MAX));
         }
         let mut levels: Vec<Level> = LEVELS.into_iter().filter(|l| self.wants(now, *l)).collect();
         if levels.is_empty() {
@@ -1766,7 +2140,9 @@ impl Connection {
         let initial = &self.spaces[0];
         let eliciting =
             initial.crypto_send.has_pending() || initial.probe || self.state == State::Closing;
-        let pad = levels.contains(&Level::Initial) && (self.side == Side::Client || eliciting);
+        let challenge = self.path.challenge_pending && levels.contains(&Level::Data);
+        let pad = (levels.contains(&Level::Initial) && (self.side == Side::Client || eliciting))
+            || (challenge && budget >= MIN_INITIAL_SIZE);
         if pad && budget < MIN_INITIAL_SIZE {
             return false;
         }
@@ -1792,7 +2168,7 @@ impl Connection {
         if !ack_only && self.config.pacing {
             self.pacer.on_sent(out.len());
         }
-        self.amplification.on_sent(out.len());
+        self.path.amplification.on_sent(out.len());
         if sent_handshake && self.side == Side::Client {
             // RFC 9001 section 4.9.1.
             self.discard(Level::Initial);
@@ -1826,7 +2202,12 @@ impl Connection {
         let mut sent: Vec<Sent> = Vec::new();
         let mut ack_eliciting = false;
 
-        if self.state == State::Closing {
+        let explicit = self.explicit.take();
+        let untracked = explicit.is_some();
+        if let Some(frame) = explicit {
+            payload = frame;
+            ack_eliciting = true;
+        } else if self.state == State::Closing {
             self.write_close_frame(level, &mut payload, max_payload);
         } else if self.ack_only {
             self.write_ack(now, level, &mut payload);
@@ -1883,6 +2264,12 @@ impl Connection {
             return false;
         }
         let size = out.len() - start;
+        if untracked {
+            // A response on another path: neither in flight on this path
+            // nor sent again.
+            self.spaces[li].next_pn += 1;
+            return true;
+        }
         let in_flight = ack_eliciting || pad > 0;
         if in_flight {
             self.cc.on_sent(size);
@@ -2014,6 +2401,48 @@ impl Connection {
                 break;
             }
             Frame::PathResponse(data).encode(payload);
+        }
+        if self.path.challenge_pending && fits(payload, 9) {
+            let mut data = [0u8; 8];
+            if random(&mut data).is_ok() {
+                Frame::PathChallenge(data).encode(payload);
+                self.path.challenge = Some(data);
+                self.path.challenge_pending = false;
+                self.path.challenge_sent = Some(self.last_activity.max(self.now_hint));
+            }
+        }
+        while let Some((seq, cid, token)) = self.new_cids_pending.pop() {
+            if !fits(payload, 46) {
+                self.new_cids_pending.push((seq, cid, token));
+                break;
+            }
+            Frame::NewConnectionId {
+                sequence: seq,
+                retire_prior_to: 0,
+                cid,
+                reset_token: token,
+            }
+            .encode(payload);
+            sent.push(Sent::NewConnectionId(seq, cid, token));
+        }
+        let mut retire: Vec<u64> = core::mem::take(&mut self.retire_pending);
+        if let Some(p) = self.peer_cids.as_ref() {
+            for s in p.pending_retirements() {
+                if !retire.contains(s) {
+                    retire.push(*s);
+                }
+            }
+        }
+        for seq in retire {
+            if !fits(payload, 9) {
+                self.retire_pending.push(seq);
+                continue;
+            }
+            Frame::RetireConnectionId { sequence: seq }.encode(payload);
+            sent.push(Sent::RetireConnectionId(seq));
+            if let Some(p) = self.peer_cids.as_mut() {
+                p.retirement_sent(seq);
+            }
         }
         if self.max_data_pending && fits(payload, 9) {
             Frame::MaxData(self.conn_recv.max()).encode(payload);
@@ -2291,7 +2720,7 @@ enum Owned {
     Retry { scid: ConnectionId, token: Vec<u8> },
     Initial { scid: ConnectionId },
     Handshake,
-    Short,
+    Short { dcid: ConnectionId },
     Other,
 }
 
@@ -2308,7 +2737,7 @@ impl From<&Header<'_>> for Owned {
                 LongType::Handshake => Owned::Handshake,
                 _ => Owned::Other,
             },
-            Header::Short { .. } => Owned::Short,
+            Header::Short { dcid, .. } => Owned::Short { dcid: *dcid },
             _ => Owned::Other,
         }
     }
