@@ -1736,15 +1736,14 @@ impl Connection {
             // window by less than one datagram, as is usual.
             if available == 0 {
                 ack_only = true;
-            } else {
-                if self.config.pacing {
-                    if let Err(at) = self.pacer.check(
-                        now,
-                        budget,
-                        self.cc.window(),
-                        self.rtt.smoothed,
-                        self.max_datagram(),
-                    ) {
+            } else if self.config.pacing {
+                let window = self.cc.window();
+                let paced =
+                    self.pacer
+                        .check(now, budget, window, self.rtt.smoothed, self.max_datagram());
+                match paced {
+                    Ok(()) => {}
+                    Err(at) => {
                         self.next_send = Some(at);
                         ack_only = true;
                     }
