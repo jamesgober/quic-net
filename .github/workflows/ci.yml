@@ -60,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [varint, packet, frames, transport_params, connection_ids, protection, streams, tokens]
+        target: [varint, packet, frames, transport_params, connection_ids, protection, streams, tokens, connection]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master

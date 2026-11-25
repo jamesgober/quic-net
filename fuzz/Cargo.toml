@@ -21,6 +21,8 @@ aes              = "0.8.4"
 aes-gcm          = "0.10.3"
 chacha20         = "0.9.1"
 chacha20poly1305 = "0.10.1"
+# The certificates and sessions of the connection target.
+tls-net          = { version = "0.11", default-features = false, features = ["quic", "ring", "webpki-roots"] }
 
 [[bin]]
 name  = "varint"
@@ -74,6 +76,13 @@ bench = false
 [[bin]]
 name  = "tokens"
 path  = "fuzz_targets/tokens.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "connection"
+path  = "fuzz_targets/connection.rs"
 test  = false
 doc   = false
 bench = false

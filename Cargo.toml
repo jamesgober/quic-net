@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "quic-net"
-version = "0.4.0"
+version = "0.5.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -51,7 +51,11 @@ path = "src/lib.rs"
 # FEATURE FLAGS
 # #################################
 [features]
-default = []
+default = ["tls"]
+# The connection and its handshake, through tls-net with the ring provider
+# and the Mozilla roots. Without it the crate is the sans-IO wire layer,
+# packet protection over key traits, streams, and address validation.
+tls = ["dep:tls-net"]
 
 
 # DEPENDENCIES
@@ -61,6 +65,9 @@ default = []
 # schedule, and XChaCha20-Poly1305 for address validation tokens (crypt-io
 # is the one exception to the no-third-party rule: audited cryptography).
 crypt-io = { version = "1.6", default-features = false, features = ["std", "mac-blake3", "mac-hmac", "aead-chacha20"] }
+# The TLS 1.3 handshake and the packet keys it produces (tls-net's QUIC
+# interface, 0.11). rustls lives behind it, tls-net's one exception.
+tls-net = { version = "0.11", default-features = false, features = ["quic", "ring", "webpki-roots"], optional = true }
 
 
 # DEV DEPENDENCIES

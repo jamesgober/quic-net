@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `quic-net`. A living document: every design decision, idea, or open question about quic-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** `0.4.0`: the sans-IO wire layer (0.2), packet protection over key traits (0.3), and streams with flow control (0.4). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
+> **Status:** `0.5.0`: a working connection over everything below. `0.4.0`: the sans-IO wire layer (0.2), packet protection over key traits (0.3), and streams with flow control (0.4). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
 
 ---
 
@@ -135,6 +135,21 @@ Replay: a `NEW_TOKEN` token can be replayed from the same IP address within its 
 
 Next to the Initial packet it arrives in (an AEAD open, then TLS), a token check is small.
 
+## 3e. Design of the connection (0.5)
+
+`Connection` is sans-IO: datagrams in, datagrams out, a timer, events. It owns no socket and reads no clock; the caller passes `now`.
+
+- **The handshake** runs through tls-net 0.11 (`TlsClient::connect_quic`, `TlsServer::accept_quic`). CRYPTO data is reassembled per level (`CryptoRecv`) and fed to `read_handshake`; what `write_handshake` produces goes into a per-level send buffer (`SendStream`, so it is retransmitted like stream data), and each `KeyChange` installs the next level's keys.
+- **Packet number spaces**: Initial, Handshake, and 1-RTT, each with its keys, its packet numbers, the ranges received (the last 32 kept for ACKs), and the packets sent and not yet acknowledged.
+- **Datagrams** coalesce one packet per level, in order. A client pads every datagram with an Initial to 1,200 bytes, a server those with an ack-eliciting Initial; ACK-only server Initials are not padded, so they spend none of the amplification allowance.
+- **Loss detection** follows RFC 9002 sections 5 and 6: RTT from ACKs (ack delay only in 1-RTT), packet threshold 3, time threshold 9/8 RTT, and the probe timeout with backoff. A client does not reset its backoff on Initial ACKs, and probes without packets in flight only until one of its Handshake packets is acknowledged (D-024).
+- **Keys** are discarded as RFC 9001 section 4.9 says: the client's Initial keys when it first sends a Handshake packet, the server's when it first opens one; Handshake keys when the handshake is confirmed (`HANDSHAKE_DONE`, or completion on the server).
+- **Transport parameters** are checked against the connection IDs seen (section 7.3). A client takes the server's only once its handshake is complete (D-025).
+- **Streams** use 0.4's parts; a peer's stream is forgotten once both its parts are done, which raises `MAX_STREAMS`. A forgotten stream reads as finished.
+- **Closing**: `CONNECTION_CLOSE` in each level with keys (an application close before 1-RTT as a transport `APPLICATION_ERROR`), then 3 PTOs of closing; a peer's close drains. The idle timeout is the smaller of the two advertised, at least 3 PTOs.
+
+Not in 0.5 (roadmap 0.6): congestion control and pacing, migration and path validation, more connection IDs, initiating key updates, 0-RTT. Until congestion control lands, a sender is limited only by flow control: fine on a local network or behind a rate limit, not on a shared path.
+
 ## 4. Threats
 
 | Threat | Defence |
@@ -157,6 +172,9 @@ Next to the Initial packet it arrives in (an AEAD open, then TLS), a token check
 | forged or altered address validation tokens | AEAD under a server key: a token that does not authenticate, has expired, or names another address validates nothing | about 1 us per token checked |
 | linking connections through `NEW_TOKEN` tokens | the token's contents are encrypted, and a fresh nonce makes every token different | none beyond the AEAD |
 | amplification through an unvalidated address | at most three times the bytes received on the path until it is validated, counted per path | two counters per path |
+| a 1-RTT packet before the client is authenticated | the server processes none until tls-net says the handshake is complete (RFC 9001 section 5.7) | none |
+| forged packets wearing down the AEAD | every packet that fails to open counts toward the integrity limit; at the limit, `AEAD_LIMIT_REACHED` | one counter |
+| a stale peer configuration on resumption | the client ignores the previous session's transport parameters and waits for the server's new ones | none |
 | stateless reset forgery or probing | tokens are keyed BLAKE3 of the ID under a secret key; comparisons in constant time; datagrams under 21 bytes are never resets | one BLAKE3 per issued ID; 16 XORs per token checked |
 
 ## 5. Prerequisites
@@ -247,3 +265,8 @@ Another way to the Initial keys, which need no handshake: crypt-io with AES-128-
 | D-018 | 2026-11-20 | Address validation tokens are sealed with XChaCha20-Poly1305 through crypt-io, not only authenticated | a `NEW_TOKEN` token is sent in clear on a later connection; with a MAC alone, the address it was issued to would be readable and would link the two connections (RFC 9000 section 8.1.3). The 192-bit random nonce makes a nonce collision under one key impossible in practice, at one extra ChaCha20 block per token |
 | D-019 | 2026-11-20 | Token keys rotate with one previous key kept; the key ID is a clear byte of the token | a rotation must not void every outstanding `NEW_TOKEN` token at once; one previous key covers a rotation period longer than a token's lifetime |
 | D-020 | 2026-11-20 | The amplification limit is counted per path in quic-net, not taken from net-io's guard | net-io counts per IP address and ages received bytes out after its window; RFC 9000 counts per path (address and port) until the path is validated. With net-io's guard, a second port of the same IP would share the first port's allowance, and a slow handshake could lose its allowance |
+| D-021 | 2026-11-25 | `Connection` is one sans-IO type for both sides: `handle_datagram`, `poll_transmit`, `poll_timeout` / `handle_timeout`, `poll_event`, and stream calls by ID; the caller supplies connection IDs and `now` | the crate stays without I/O and without a clock, so it runs on any driver (net-io's reactor, a test harness, a simulation) and every behaviour is reproducible; IDs come from the caller because only it knows its routing scheme (and its random source) |
+| D-022 | 2026-11-25 | The connection depends on tls-net 0.11 with the ring provider and the Mozilla roots, behind a default `tls` feature | QUIC without TLS is only the wire layer; keeping that layer usable without rustls costs one feature; ring needs no build tools, as in dns-net (D-021 there) |
+| D-023 | 2026-11-25 | Loss detection and the probe timeout come with 0.5; congestion control waits for 0.6 | a handshake that loses a datagram must recover, so RFC 9002's detection and PTO are needed now; congestion control is its own design (and benchmarks) |
+| D-024 | 2026-11-25 | A client keeps its PTO backoff across Initial ACKs and probes without packets in flight only until a Handshake packet of its own is acknowledged | RFC 9002 section 6.2.1 and 6.2.2.1; found by the `connection` fuzz target: with the backoff reset and the probes unconditional, a client whose server lost its flight probed every PTO (1 ms on a fast path) until the server's own timer fired |
+| D-025 | 2026-11-25 | A client applies the server's transport parameters only once its handshake is complete | on resumption rustls returns the previous session's parameters before the handshake (for 0-RTT); applying them failed the connection IDs check. Found by the `connection` fuzz target |

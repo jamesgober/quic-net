@@ -73,7 +73,10 @@ pub trait PacketKey {
         payload: &mut [u8],
     ) -> Result<[u8; TAG_LEN], CryptoError>;
 
-    /// Checks `tag` and decrypts `payload` in place.
+    /// Checks the tag at the end of `payload_and_tag` and decrypts the rest
+    /// in place; returns the plaintext's length. The payload and its tag are
+    /// one slice because they are contiguous in a packet, and TLS libraries
+    /// open them that way.
     ///
     /// # Errors
     ///
@@ -83,9 +86,8 @@ pub trait PacketKey {
         &self,
         pn: u64,
         header: &[u8],
-        payload: &mut [u8],
-        tag: &[u8; TAG_LEN],
-    ) -> Result<(), CryptoError>;
+        payload_and_tag: &mut [u8],
+    ) -> Result<usize, CryptoError>;
 
     /// The cipher's limits (RFC 9001 section 6.6).
     fn limits(&self) -> AeadLimits;
@@ -310,10 +312,12 @@ pub fn open_payload<K: PacketKey + ?Sized>(
     }
     let (header, rest) = packet.split_at_mut(header_len);
     let tag_at = rest.len() - TAG_LEN;
-    let (payload, tag) = rest.split_at_mut(tag_at);
-    let tag = <&[u8; TAG_LEN]>::try_from(&*tag).map_err(|_| ProtectError::TooShort)?;
-    key.open(unprotected.pn, header, payload, tag)
+    let n = key
+        .open(unprotected.pn, header, rest)
         .map_err(|_| ProtectError::Authentication)?;
+    if n != tag_at {
+        return Err(ProtectError::Authentication);
+    }
     if unprotected.first & reserved_bits(unprotected.first) != 0 {
         return Err(ProtectError::ReservedBits);
     }
@@ -712,16 +716,17 @@ mod tests {
             &self,
             pn: u64,
             header: &[u8],
-            payload: &mut [u8],
-            tag: &[u8; 16],
-        ) -> Result<(), CryptoError> {
+            payload_and_tag: &mut [u8],
+        ) -> Result<usize, CryptoError> {
+            let at = payload_and_tag.len().checked_sub(16).ok_or(CryptoError)?;
+            let (payload, tag) = payload_and_tag.split_at_mut(at);
             if toy_tag(pn, header, payload) != *tag {
                 return Err(CryptoError);
             }
             for b in payload.iter_mut() {
                 *b ^= 0x5a;
             }
-            Ok(())
+            Ok(at)
         }
         fn limits(&self) -> AeadLimits {
             AeadLimits::AES_GCM

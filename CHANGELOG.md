@@ -11,7 +11,27 @@
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] - 2026-11-25
+
+A working connection: the handshake through tls-net, and streams over it.
+
 ### Added
+
+- `Connection` (feature `tls`, on by default): a client or server QUIC
+  connection, sans-IO. The handshake runs through tls-net 0.11's QUIC
+  interface; Initial, Handshake, and 1-RTT packet number spaces; ACKs;
+  loss detection by packet and time thresholds and the probe timeout
+  (RFC 9002); Retry and version negotiation on the client; the
+  amplification limit on the server; key discarding; the peer's key
+  updates; streams with flow control; `CONNECTION_CLOSE` and the idle
+  timeout. `Config`, `Event`, `Close`, `ConnectError`, `StreamError`.
+- `TlsRetry`: the Retry integrity tag through tls-net.
+- Tests: a handshake, a 100 KB stream echo, the echo over channels losing
+  every third, fifth, or seventh datagram, a resumed TLS session, Retry
+  with address validation tokens, closing, and the amplification limit;
+  a `connection` fuzz target.
 
 - `Tokens` and `TokenCheck`: Retry and `NEW_TOKEN` address validation
   tokens, sealed with XChaCha20-Poly1305 through crypt-io, bound to the
@@ -22,6 +42,8 @@
 ### Changed
 
 - crypt-io's `aead-chacha20` feature, for the tokens.
+- `PacketKey::open` takes the payload and its tag as one slice and returns
+  the plaintext's length, as TLS libraries open them.
 
 ---
 
