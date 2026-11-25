@@ -13,6 +13,29 @@
 
 ---
 
+## [0.6.0] - 2026-11-25
+
+Congestion control.
+
+### Added
+
+- NewReno congestion control (RFC 9002 section 7): slow start, one halving
+  per recovery period, congestion avoidance, the minimum window, and
+  persistent congestion. Bytes in flight are counted across every packet
+  number space; ACK-only packets are never held back, and probes and
+  closes may pass the window.
+- Pacing at 1.25 times the window per round trip, with bursts of up to ten
+  datagrams (RFC 9002 section 7.7); `Config::pacing`, on by default.
+- `Connection::congestion_window`, `bytes_in_flight`, `congestion_state`,
+  and `CongestionState`.
+- A test sending 400 KB through a bottleneck that drops what its queue
+  cannot hold: the window bounds what is in flight, shrinks on loss, and
+  every byte arrives.
+
+### Changed
+
+- The README no longer calls quic-net planned for later.
+
 ## [0.5.0] - 2026-11-25
 
 A working connection: the handshake through tls-net, and streams over it.

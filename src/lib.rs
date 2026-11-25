@@ -27,7 +27,8 @@
 //! With the `tls` feature (on by default), `Connection` puts it together:
 //! a client or server connection, sans-IO, whose handshake runs through
 //! tls-net. The caller passes it datagrams, sends what it produces, and
-//! runs its timers.
+//! runs its timers. Its congestion control is NewReno with pacing (RFC 9002
+//! section 7).
 //!
 //! ## Read the frames of a packet
 //!
@@ -69,6 +70,8 @@
 )]
 
 mod address;
+#[cfg(feature = "tls")]
+mod cc;
 mod cid;
 #[cfg(feature = "tls")]
 mod conn;
@@ -87,6 +90,8 @@ mod tls;
 mod varint;
 
 pub use address::{Amplification, MAX_TOKEN_LEN, TokenCheck, Tokens};
+#[cfg(feature = "tls")]
+pub use cc::CongestionState;
 pub use cid::{
     CidError, ConnectionId, LocalCids, MAX_CID_LEN, MIN_STATELESS_RESET, PeerCid, PeerCids,
     ResetKey, ResetToken, is_stateless_reset,

@@ -9,9 +9,11 @@
 //! [`Connection::handle_timeout`] at [`Connection::poll_timeout`], and reads
 //! [`Connection::poll_event`].
 //!
-//! Not in this version (PLAN section 3e): congestion control and pacing
-//! (0.6), 0-RTT, connection migration, issuing more connection IDs, and
-//! initiating key updates (the peer's are followed).
+//! Congestion control is NewReno with pacing (RFC 9002 section 7).
+//!
+//! Not in this version (PLAN section 3e): 0-RTT, connection migration,
+//! issuing more connection IDs, and initiating key updates (the peer's are
+//! followed).
 
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -21,6 +23,7 @@ use tls_net::quic::{DirectionalKeys, KeyChange, PacketKeySet, QuicSession, Secre
 use tls_net::{TlsClient, TlsServer};
 
 use crate::address::Amplification;
+use crate::cc::{CongestionState, NewReno, Pacer};
 use crate::cid::{ConnectionId, PeerCids, ResetKey, ResetToken, is_stateless_reset};
 use crate::error::TransportErrorCode;
 use crate::flow::{RecvCredit, SendCredit};
@@ -69,6 +72,9 @@ pub struct Config {
     /// The key for the stateless reset token sent with the server's
     /// connection ID.
     pub reset_key: Option<std::sync::Arc<ResetKey>>,
+    /// Whether to pace packets over the round trip (RFC 9002 section 7.7).
+    /// On by default; off sends each window as fast as the socket takes it.
+    pub pacing: bool,
 }
 
 impl Default for Config {
@@ -90,6 +96,7 @@ impl Default for Config {
             max_datagram: MIN_INITIAL_SIZE,
             send_buffer: 1 << 20,
             reset_key: None,
+            pacing: true,
         }
     }
 }
@@ -208,6 +215,9 @@ enum Sent {
 struct SentPacket {
     time: Instant,
     ack_eliciting: bool,
+    /// Ack-eliciting or padded: counted against the congestion window.
+    in_flight: bool,
+    size: usize,
     frames: Vec<Sent>,
 }
 
@@ -354,6 +364,10 @@ pub struct Connection {
     peer_reset: Option<ResetToken>,
     amplification: Amplification,
     rtt: Rtt,
+    cc: NewReno,
+    pacer: Pacer,
+    /// When pacing next lets a packet in flight go.
+    next_send: Option<Instant>,
     pto_count: u32,
     idle_timeout: Duration,
     last_activity: Instant,
@@ -383,6 +397,8 @@ pub struct Connection {
     path_responses: Vec<[u8; 8]>,
     /// Round robin over streams with data to send.
     next_stream: Option<StreamId>,
+    /// The datagram being built may carry ACKs only.
+    ack_only: bool,
 }
 
 impl fmt::Debug for Connection {
@@ -561,6 +577,9 @@ impl Connection {
             peer_reset: None,
             amplification: Amplification::new(),
             rtt: Rtt::new(),
+            cc: NewReno::new(MIN_INITIAL_SIZE),
+            pacer: Pacer::new(),
+            next_send: None,
             pto_count: 0,
             idle_timeout,
             last_activity: now,
@@ -586,6 +605,7 @@ impl Connection {
             stops_pending: BTreeMap::new(),
             path_responses: Vec::new(),
             next_stream: None,
+            ack_only: false,
             config,
         }
     }
@@ -631,6 +651,25 @@ impl Connection {
     #[must_use]
     pub fn rtt(&self) -> Duration {
         self.rtt.smoothed
+    }
+
+    /// The congestion window, in bytes.
+    #[must_use]
+    pub fn congestion_window(&self) -> u64 {
+        self.cc.window()
+    }
+
+    /// Bytes in flight: sent, ack-eliciting or padded, and neither
+    /// acknowledged nor lost.
+    #[must_use]
+    pub fn bytes_in_flight(&self) -> u64 {
+        self.cc.in_flight()
+    }
+
+    /// Where the congestion controller stands.
+    #[must_use]
+    pub fn congestion_state(&self) -> CongestionState {
+        self.cc.state()
     }
 
     /// The next event, if any.
@@ -726,7 +765,12 @@ impl Connection {
         s.discarded = true;
         s.local = None;
         s.remote = None;
-        s.sent.clear();
+        for p in core::mem::take(&mut s.sent).into_values() {
+            if p.in_flight {
+                self.cc.on_discarded(p.size);
+            }
+        }
+        let s = &mut self.spaces[level as usize];
         s.loss_time = None;
         s.probe = false;
         s.unacked = 0;
@@ -1002,6 +1046,9 @@ impl Connection {
         // Everything sent in Initial packets goes again under the new keys.
         let lost: Vec<SentPacket> = core::mem::take(&mut s.sent).into_values().collect();
         for p in lost {
+            if p.in_flight {
+                self.cc.on_discarded(p.size);
+            }
             self.on_packet_lost(Level::Initial, p);
         }
     }
@@ -1279,6 +1326,9 @@ impl Connection {
             }
         }
         for (_, p) in acked {
+            if p.in_flight {
+                self.cc.on_acked(p.size, p.time);
+            }
             for f in p.frames {
                 self.on_frame_acked(level, f);
             }
@@ -1337,9 +1387,34 @@ impl Connection {
             }
         }
         self.spaces[li].loss_time = loss_time;
+        let mut bytes = 0;
+        let mut span: Option<(Instant, Instant)> = None;
+        let mut eliciting = 0;
         for pn in lost {
             if let Some(p) = self.spaces[li].sent.remove(&pn) {
+                if p.in_flight {
+                    bytes += p.size;
+                    span = Some(
+                        span.map_or((p.time, p.time), |(a, b)| (a.min(p.time), b.max(p.time))),
+                    );
+                }
+                eliciting += usize::from(p.ack_eliciting);
                 self.on_packet_lost(level, p);
+            }
+        }
+        if let Some((first, last)) = span {
+            self.cc.on_lost(bytes, last, now);
+            // RFC 9002 section 7.6: losses spanning three probe timeouts,
+            // with an RTT sample to judge by.
+            let max_ack_delay = self
+                .peer_params
+                .as_ref()
+                .map_or(Duration::ZERO, |p| p.max_ack_delay);
+            let period =
+                (self.rtt.pto() + max_ack_delay) * crate::cc::PERSISTENT_CONGESTION_THRESHOLD;
+            if self.rtt.sampled && eliciting >= 2 && last.saturating_duration_since(first) > period
+            {
+                self.cc.on_persistent_congestion();
             }
         }
     }
@@ -1401,6 +1476,7 @@ impl Connection {
         };
         earliest(self.loss_or_pto().map(|(at, _, _)| at));
         earliest(self.ack_deadline());
+        earliest(self.next_send);
         t
     }
 
@@ -1479,6 +1555,11 @@ impl Connection {
         if self.state == State::Closed {
             return;
         }
+        if self.next_send.is_some_and(|t| now >= t) {
+            // Pacing allows the next packet; poll_transmit sets a new time
+            // if it is still held back.
+            self.next_send = None;
+        }
         if let Some(t) = self.close_at {
             if now >= t {
                 self.state = State::Closed;
@@ -1508,6 +1589,9 @@ impl Connection {
                         .collect();
                     s.probe = true;
                     for p in lost {
+                        if p.in_flight {
+                            self.cc.on_discarded(p.size);
+                        }
                         self.on_packet_lost(level, p);
                     }
                 }
@@ -1638,10 +1722,44 @@ impl Connection {
             budget =
                 budget.min(usize::try_from(self.amplification.allowance()).unwrap_or(usize::MAX));
         }
-        let levels: Vec<Level> = LEVELS.into_iter().filter(|l| self.wants(now, *l)).collect();
+        let mut levels: Vec<Level> = LEVELS.into_iter().filter(|l| self.wants(now, *l)).collect();
         if levels.is_empty() {
             return false;
         }
+        // Congestion control and pacing hold back what would be in flight;
+        // ACKs always go, and so do probes and closes (RFC 9002 section 7.5).
+        let probing = self.state == State::Closing || self.spaces.iter().any(|s| s.probe);
+        let mut ack_only = false;
+        if !probing {
+            let available = usize::try_from(self.cc.available()).unwrap_or(usize::MAX);
+            // A datagram goes while the window has room: it may pass the
+            // window by less than one datagram, as is usual.
+            if available == 0 {
+                ack_only = true;
+            } else {
+                if self.config.pacing {
+                    if let Err(at) = self.pacer.check(
+                        now,
+                        budget,
+                        self.cc.window(),
+                        self.rtt.smoothed,
+                        self.max_datagram(),
+                    ) {
+                        self.next_send = Some(at);
+                        ack_only = true;
+                    }
+                }
+            }
+        }
+        if ack_only {
+            levels.retain(|l| self.spaces[*l as usize].unacked > 0);
+            if levels.is_empty() {
+                return false;
+            }
+        } else {
+            self.next_send = None;
+        }
+        self.ack_only = ack_only;
         // A datagram with an Initial packet is padded to 1,200 bytes: a
         // client's always, a server's when the Initial is ack-eliciting
         // (RFC 9000 section 14.1). An ACK alone is not padded, so it spends
@@ -1671,6 +1789,9 @@ impl Connection {
         }
         if out.is_empty() {
             return false;
+        }
+        if !ack_only && self.config.pacing {
+            self.pacer.on_sent(out.len());
         }
         self.amplification.on_sent(out.len());
         if sent_handshake && self.side == Side::Client {
@@ -1708,6 +1829,8 @@ impl Connection {
 
         if self.state == State::Closing {
             self.write_close_frame(level, &mut payload, max_payload);
+        } else if self.ack_only {
+            self.write_ack(now, level, &mut payload);
         } else {
             self.write_ack(now, level, &mut payload);
             while max_payload.saturating_sub(payload.len()) > 24 {
@@ -1760,14 +1883,21 @@ impl Connection {
             out.truncate(start);
             return false;
         }
+        let size = out.len() - start;
+        let in_flight = ack_eliciting || pad > 0;
+        if in_flight {
+            self.cc.on_sent(size);
+        }
         let s = &mut self.spaces[li];
         s.next_pn += 1;
-        if ack_eliciting || !sent.is_empty() {
+        if in_flight || !sent.is_empty() {
             s.sent.insert(
                 pn,
                 SentPacket {
                     time: now,
                     ack_eliciting,
+                    in_flight,
+                    size,
                     frames: sent,
                 },
             );
