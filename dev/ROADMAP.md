@@ -43,9 +43,15 @@
 - [x] A bottleneck test: the window bounds what is in flight and shrinks on loss.
 - Moved to 0.7, with the reason in PLAN D-026: migration and path validation, more connection IDs, initiating key updates, 0-RTT.
 
-## v0.7.0 - Migration
-- [ ] Migration and path validation; issuing more connection IDs; initiating key updates (moved from 0.6, D-026).
-- [ ] 0-RTT (moved from 0.6, D-026).
+## v0.7.0 - Migration (2026-11-25)
+- [x] Paths and path validation; the server following a client to a new address (NAT rebinding included); issuing connection IDs; a client's migration (D-029 to D-031).
+- [x] Tests for rebinding, migration, replay from another address, and a rebinding that returns; the `connection` fuzz target changes addresses.
+- Moved to 0.8, with the reason in PLAN D-029: initiating key updates and 0-RTT.
+
+## v0.8.0 - Key updates and 0-RTT
+- [ ] Key updates started by this endpoint (moved from 0.7, D-029).
+- [ ] 0-RTT (moved from 0.7, D-029).
+- [ ] The server's preferred address.
 
 ## v1.0.0 - Stable
 - [ ] Frozen after an HTTP/3 engine has used it end to end.

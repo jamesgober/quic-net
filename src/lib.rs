@@ -28,7 +28,8 @@
 //! a client or server connection, sans-IO, whose handshake runs through
 //! tls-net. The caller passes it datagrams, sends what it produces, and
 //! runs its timers. Its congestion control is NewReno with pacing (RFC 9002
-//! section 7).
+//! section 7), and it follows a client that changes address once the new
+//! address answers a path challenge (RFC 9000 section 9).
 //!
 //! ## Read the frames of a packet
 //!
@@ -97,7 +98,7 @@ pub use cid::{
     ResetKey, ResetToken, is_stateless_reset,
 };
 #[cfg(feature = "tls")]
-pub use conn::{Close, Config, ConnectError, Connection, Event, StreamError};
+pub use conn::{Close, Config, ConnectError, Connection, Event, MigrateError, StreamError};
 pub use error::{DecodeError, TransportErrorCode};
 pub use flow::{RecvCredit, SendCredit};
 pub use frame::{

@@ -4,7 +4,11 @@
 
 #![cfg(feature = "tls")]
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
+
+const CLIENT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 5000);
+const SERVER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 443);
 
 use quic_net::{
     Close, Config, Connection, ConnectionId, Event, Header, Side, TlsRetry, TokenCheck, Tokens,
@@ -40,6 +44,10 @@ fn cid(b: u8) -> ConnectionId {
 struct Pair {
     client: Connection,
     server: Connection,
+    /// Where the client's datagrams come from (it may move).
+    client_addr: SocketAddr,
+    /// Every server event `echo` has seen.
+    server_log: Vec<Event>,
     now: Instant,
     to_server: Vec<Vec<u8>>,
     to_client: Vec<Vec<u8>>,
@@ -48,7 +56,7 @@ struct Pair {
 
 fn first_initial(client: &mut Connection, now: Instant) -> Vec<u8> {
     let mut d = Vec::new();
-    assert!(client.poll_transmit(now, &mut d));
+    assert!(client.poll_transmit(now, &mut d).is_some());
     assert!(d.len() >= 1200, "{}", d.len());
     d
 }
@@ -60,6 +68,7 @@ fn server_for(server_tls: &TlsServer, d: &[u8], now: Instant) -> Connection {
     };
     Connection::server(
         server_tls,
+        CLIENT,
         Config::default(),
         cid(0x5e),
         dcid,
@@ -82,6 +91,7 @@ impl Pair {
         let mut client = Connection::client(
             client_tls,
             "localhost",
+            SERVER,
             Config::default(),
             cid(0xc1),
             cid(0xd1),
@@ -93,6 +103,8 @@ impl Pair {
         Pair {
             client,
             server,
+            client_addr: CLIENT,
+            server_log: Vec::new(),
             now,
             to_server: vec![first],
             to_client: Vec::new(),
@@ -107,25 +119,27 @@ impl Pair {
             let mut moved = false;
             for d in core::mem::take(&mut self.to_server) {
                 let mut d = d;
-                self.server.handle_datagram(self.now, &mut d);
+                self.server
+                    .handle_datagram(self.now, self.client_addr, &mut d);
                 moved = true;
             }
             for d in core::mem::take(&mut self.to_client) {
                 let mut d = d;
-                self.client.handle_datagram(self.now, &mut d);
+                self.client.handle_datagram(self.now, SERVER, &mut d);
                 moved = true;
             }
             let mut buf = Vec::new();
-            while self.client.poll_transmit(self.now, &mut buf) {
+            while self.client.poll_transmit(self.now, &mut buf).is_some() {
                 self.sent += 1;
                 if keep(self.sent) {
                     self.to_server.push(buf.clone());
                 }
                 moved = true;
             }
-            while self.server.poll_transmit(self.now, &mut buf) {
+            while let Some(to) = self.server.poll_transmit(self.now, &mut buf) {
                 self.sent += 1;
-                if keep(self.sent) {
+                // Datagrams to an address the client left are lost.
+                if to == self.client_addr && keep(self.sent) {
                     self.to_client.push(buf.clone());
                 }
                 moved = true;
@@ -210,6 +224,7 @@ fn echo(p: &mut Pair, len: usize, keep: &mut dyn FnMut(usize) -> bool) {
             if let Event::StreamOpened(sid) = e {
                 server_id = Some(sid);
             }
+            p.server_log.push(e);
         }
         if let Some(sid) = server_id {
             loop {
@@ -300,6 +315,7 @@ fn test_retry() {
     let mut client = Connection::client(
         &client_tls,
         "localhost",
+        SERVER,
         Config::default(),
         cid(0xc1),
         cid(0xd1),
@@ -323,7 +339,7 @@ fn test_retry() {
     retry.truncate(retry.len() - 16);
     let tag = retry_tag(&dcid, &retry, &TlsRetry).unwrap();
     retry.extend_from_slice(&tag);
-    client.handle_datagram(now, &mut retry);
+    client.handle_datagram(now, SERVER, &mut retry);
     // The client comes back with the token, to the new ID.
     let second = first_initial(&mut client, now);
     let p = parse_packet(&second, 8).unwrap();
@@ -343,6 +359,7 @@ fn test_retry() {
     };
     let server = Connection::server(
         &server_tls,
+        CLIENT,
         Config::default(),
         cid(0x5e),
         dcid,
@@ -355,6 +372,8 @@ fn test_retry() {
     let mut p = Pair {
         client,
         server,
+        client_addr: CLIENT,
+        server_log: Vec::new(),
         now,
         to_server: vec![second],
         to_client: Vec::new(),
@@ -374,6 +393,7 @@ fn test_the_server_keeps_to_the_amplification_limit() {
     let mut client = Connection::client(
         &client_tls,
         "localhost",
+        SERVER,
         Config::default(),
         cid(0xc1),
         cid(0xd1),
@@ -383,10 +403,10 @@ fn test_the_server_keeps_to_the_amplification_limit() {
     let mut first = first_initial(&mut client, now);
     let received = first.len();
     let mut server = server_for(&server_tls, &first, now);
-    server.handle_datagram(now, &mut first);
+    server.handle_datagram(now, CLIENT, &mut first);
     let mut sent = 0;
     let mut buf = Vec::new();
-    while server.poll_transmit(now, &mut buf) {
+    while server.poll_transmit(now, &mut buf).is_some() {
         sent += buf.len();
     }
     assert!(sent > 0);
@@ -417,7 +437,7 @@ fn test_the_window_bounds_what_is_in_flight() {
                 p.client.stream_finish(id).unwrap();
             }
         }
-        while p.client.poll_transmit(p.now, &mut buf) {
+        while p.client.poll_transmit(p.now, &mut buf).is_some() {
             assert!(
                 p.client.bytes_in_flight() <= p.client.congestion_window() + 1500,
                 "{} in flight for a window of {}",
@@ -435,11 +455,11 @@ fn test_the_window_bounds_what_is_in_flight() {
             let Some(mut d) = queue.pop_front() else {
                 break;
             };
-            p.server.handle_datagram(p.now, &mut d);
+            p.server.handle_datagram(p.now, CLIENT, &mut d);
         }
-        while p.server.poll_transmit(p.now, &mut buf) {
+        while p.server.poll_transmit(p.now, &mut buf).is_some() {
             let mut d = buf.clone();
-            p.client.handle_datagram(p.now, &mut d);
+            p.client.handle_datagram(p.now, SERVER, &mut d);
         }
         for e in Pair::events(&mut p.server) {
             if let Event::StreamOpened(s) = e {
@@ -478,4 +498,143 @@ fn test_the_window_bounds_what_is_in_flight() {
         .min()
         .unwrap();
     assert!(after_peak < peak, "the window never shrank after a loss");
+}
+
+fn path_changes(events: &[Event]) -> Vec<SocketAddr> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::PathChanged(a) => Some(*a),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn test_the_server_issues_connection_ids() {
+    let mut p = Pair::new();
+    p.run(50, &mut |_| true);
+    let issued = Pair::events(&mut p.server)
+        .iter()
+        .filter(|e| matches!(e, Event::LocalCidIssued(_)))
+        .count();
+    // The client's limit is 2: one more besides the handshake's.
+    assert_eq!(issued, 1);
+}
+
+#[test]
+fn test_nat_rebinding() {
+    // The client's NAT gives it a new port; the client does not know. The
+    // server follows once the new address answers its challenge.
+    let mut p = Pair::new();
+    p.run(50, &mut |_| true);
+    let _ = Pair::events(&mut p.server);
+    let rebound = SocketAddr::new(CLIENT.ip(), 5001);
+    p.client_addr = rebound;
+    echo(&mut p, 50_000, &mut |_| true);
+    let mut events = core::mem::take(&mut p.server_log);
+    events.extend(Pair::events(&mut p.server));
+    assert_eq!(path_changes(&events), vec![rebound]);
+    let mut buf = Vec::new();
+    let id = p.client.open_stream(true).unwrap();
+    p.client.stream_write(id, b"more").unwrap();
+    p.run(1, &mut |_| true);
+    while let Some(to) = p.server.poll_transmit(p.now, &mut buf) {
+        assert_eq!(to, rebound);
+    }
+}
+
+#[test]
+fn test_a_replayed_packet_from_elsewhere_moves_nothing() {
+    let mut p = Pair::new();
+    p.run(50, &mut |_| true);
+    let _ = Pair::events(&mut p.server);
+    let id = p.client.open_stream(true).unwrap();
+    p.client.stream_write(id, b"hello").unwrap();
+    let mut buf = Vec::new();
+    assert!(p.client.poll_transmit(p.now, &mut buf).is_some());
+    let mut original = buf.clone();
+    let mut replay = buf.clone();
+    p.server.handle_datagram(p.now, CLIENT, &mut original);
+    // An attacker replays it from its own address: a duplicate packet
+    // number, so nothing moves.
+    let attacker = "203.0.113.66:4444".parse().unwrap();
+    p.server.handle_datagram(p.now, attacker, &mut replay);
+    assert!(path_changes(&Pair::events(&mut p.server)).is_empty());
+    while let Some(to) = p.server.poll_transmit(p.now, &mut buf) {
+        assert_eq!(to, CLIENT);
+    }
+}
+
+#[test]
+fn test_client_migration() {
+    let mut p = Pair::new();
+    p.run(50, &mut |_| true);
+    let server_events = Pair::events(&mut p.server);
+    let issued: Vec<ConnectionId> = server_events
+        .iter()
+        .filter_map(|e| match e {
+            Event::LocalCidIssued(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(issued.len(), 1);
+    // The client moves to a new network, and to the server's new ID.
+    p.client.migrate(p.now).unwrap();
+    let moved = "198.51.100.7:6000".parse().unwrap();
+    p.client_addr = moved;
+    echo(&mut p, 30_000, &mut |_| true);
+    let mut events = core::mem::take(&mut p.server_log);
+    events.extend(Pair::events(&mut p.server));
+    assert_eq!(path_changes(&events), vec![moved]);
+    // The handshake's ID was retired.
+    assert!(
+        events.contains(&Event::LocalCidRetired(cid(0x5e))),
+        "{events:?}"
+    );
+    // The server replaced the retired ID with a new one.
+    let issued_after = events
+        .iter()
+        .skip_while(|e| !matches!(e, Event::LocalCidRetired(_)))
+        .any(|e| matches!(e, Event::LocalCidIssued(_)));
+    assert!(issued_after, "{events:?}");
+}
+
+#[test]
+fn test_a_brief_rebinding_returns() {
+    // One datagram comes from a new port, then the client is back on its
+    // old one and never answers at the new: the server ends on the old.
+    let mut p = Pair::new();
+    p.run(50, &mut |_| true);
+    let _ = Pair::events(&mut p.server);
+    p.client_addr = SocketAddr::new(CLIENT.ip(), 5002);
+    let id = p.client.open_stream(true).unwrap();
+    p.client.stream_write(id, b"one").unwrap();
+    p.run(1, &mut |_| true);
+    p.client_addr = CLIENT;
+    p.run(20, &mut |_| true);
+    // The three bytes are read off their own stream before the echo.
+    let opened = Pair::events(&mut p.server)
+        .into_iter()
+        .find_map(|e| match e {
+            Event::StreamOpened(s) => Some(s),
+            _ => None,
+        });
+    let mut three = [0u8; 8];
+    assert_eq!(
+        p.server.stream_read(opened.unwrap(), &mut three).unwrap(),
+        3
+    );
+    echo(&mut p, 20_000, &mut |_| true);
+    p.run(200, &mut |_| true);
+    let mut buf = Vec::new();
+    p.client.stream_write(id, b"two").unwrap();
+    p.run(1, &mut |_| true);
+    let mut sent = 0;
+    while let Some(to) = p.server.poll_transmit(p.now, &mut buf) {
+        assert_eq!(to, CLIENT);
+        sent += 1;
+    }
+    let _ = sent;
+    assert!(!p.server.is_closed());
 }

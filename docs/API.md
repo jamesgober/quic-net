@@ -1,6 +1,6 @@
 # quic-net - API Reference
 
-> Every public item of `quic-net` `0.6.0`: the wire layer, packet protection, streams, address validation, and the connection. The rustdoc on docs.rs has the full signatures.
+> Every public item of `quic-net` `0.7.0`: the wire layer, packet protection, streams, address validation, and the connection. The rustdoc on docs.rs has the full signatures.
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
@@ -14,7 +14,7 @@
 - [Packet protection](#packet-protection): `PacketKey`, `HeaderKey`, `seal_packet`, `remove_header_protection`, `open_payload`, `Unprotected`, `ProtectError`, `CryptoError`, `nonce`, `AeadLimits`, `AeadUsage`, `Secret`, `KeyMaterial`, `InitialSecrets`, `RetryIntegrity`, `retry_tag`, `verify_retry`, `TAG_LEN`, `SAMPLE_LEN`, `INITIAL_SALT_V1`, `RETRY_KEY_V1`, `RETRY_NONCE_V1`
 - [Streams and flow control](#streams-and-flow-control): `StreamId`, `LocalStreams`, `RemoteStreams`, `RecvCredit`, `SendCredit`, `RecvStream`, `RecvState`, `SendStream`, `SendState`, `Chunk`, `CryptoRecv`, `MAX_FRAGMENTS`, `MAX_CRYPTO_BUFFER`
 - [Address validation](#address-validation): `Tokens`, `TokenCheck`, `MAX_TOKEN_LEN`, `Amplification`
-- [Connection](#connection) (feature `tls`): `Connection`, `Config`, `Event`, `Close`, `ConnectError`, `StreamError`, `CongestionState`, `TlsRetry`
+- [Connection](#connection) (feature `tls`): `Connection`, `Config`, `Event`, `Close`, `ConnectError`, `StreamError`, `MigrateError`, `CongestionState`, `TlsRetry`
 - [Errors](#errors): `DecodeError`, `TransportErrorCode`
 - [`VERSION`](#version)
 
@@ -155,10 +155,11 @@ conn.consumed(stream.take_consumed());
 
 Feature `tls` (on by default): a QUIC connection, sans-IO, with its handshake through tls-net 0.11.
 
-- `Connection::client(tls, server_name, config, local_cid, initial_dcid, now)`, or `client_with_token(.., token, now)` with a `NEW_TOKEN` token from an earlier connection.
-- `Connection::server(tls, config, local_cid, client_dcid, client_scid, retry, validated, now)` for a client's first Initial: `retry` is `Some((original_dcid, retry_scid))` from a checked Retry token, `validated` whether a token proved the address.
-- The loop: `handle_datagram(now, &mut datagram)` for each datagram from the peer; `poll_transmit(now, &mut out) -> bool` until it returns `false`, sending each datagram; `poll_timeout()` and `handle_timeout(now)`; `poll_event() -> Option<Event>`.
-- `Event`: `Connected`, `StreamOpened(id)`, `StreamReadable(id)`, `StreamReset { id, code }`, `StreamStopped { id, code }`, `NewToken(token)`, `Closed(Close { code, application, reason, remote })`.
+- `Connection::client(tls, server_name, server_addr, config, local_cid, initial_dcid, now)`, or `client_with_token(.., token, now)` with a `NEW_TOKEN` token from an earlier connection.
+- `Connection::server(tls, client_addr, config, local_cid, client_dcid, client_scid, retry, validated, now)` for a client's first Initial: `retry` is `Some((original_dcid, retry_scid))` from a checked Retry token, `validated` whether a token proved the address.
+- The loop: `handle_datagram(now, from, &mut datagram)` for each datagram from the peer; `poll_transmit(now, &mut out) -> Option<SocketAddr>` until it returns `None`, sending each datagram to the address it returns; `poll_timeout()` and `handle_timeout(now)`; `poll_event() -> Option<Event>`.
+- `Event`: `Connected`, `StreamOpened(id)`, `StreamReadable(id)`, `StreamReset { id, code }`, `StreamStopped { id, code }`, `NewToken(token)`, `PathChanged(addr)`, `LocalCidIssued(cid)` and `LocalCidRetired(cid)` (route these to the connection, or stop), `Closed(Close { code, application, reason, remote })`.
+- Migration: a server follows a client whose non-probing packet with the largest packet number comes from a new address, sends there within three times what it receives until the address answers a `PATH_CHALLENGE`, and returns to the previous path if it never does. `migrate(now) -> Result<(), MigrateError>` moves a client that changed its socket to a fresh connection ID of the server's and proves the new path; `MigrateError`: `NotNow`, `Disabled`, `NoConnectionId`.
 - Streams: `open_stream(bidi)`, `stream_write(id, data) -> usize`, `stream_finish(id)`, `stream_reset(id, code)`, `stream_read(id, out) -> usize` (0 when nothing is ready), `stream_is_finished(id)`, `stream_stop(id, code)`.
 - `close(now, code, reason)`, `is_established()`, `is_closed()`, `close_reason()`, `alpn()`, `peer_params()`, `rtt()`, `local_cid()`, `side()`.
 - Congestion: `congestion_window()`, `bytes_in_flight()`, `congestion_state() -> CongestionState` (`SlowStart`, `CongestionAvoidance`, `Recovery`). NewReno (RFC 9002 section 7) with pacing; `poll_timeout` includes the pacing timer.
@@ -173,7 +174,7 @@ while conn.poll_transmit(Instant::now(), &mut out) {
 }
 ```
 
-Not yet: 0-RTT, migration, issuing more connection IDs, initiating key updates (the peer's are followed).
+Not yet: 0-RTT, the server's preferred address, initiating key updates (the peer's are followed).
 
 ## Errors
 
