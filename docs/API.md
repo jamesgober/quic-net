@@ -1,6 +1,6 @@
 # quic-net - API Reference
 
-> Every public item of `quic-net` `0.5.0`: the wire layer, packet protection, streams, address validation, and the connection. The rustdoc on docs.rs has the full signatures.
+> Every public item of `quic-net` `0.6.0`: the wire layer, packet protection, streams, address validation, and the connection. The rustdoc on docs.rs has the full signatures.
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
@@ -14,7 +14,7 @@
 - [Packet protection](#packet-protection): `PacketKey`, `HeaderKey`, `seal_packet`, `remove_header_protection`, `open_payload`, `Unprotected`, `ProtectError`, `CryptoError`, `nonce`, `AeadLimits`, `AeadUsage`, `Secret`, `KeyMaterial`, `InitialSecrets`, `RetryIntegrity`, `retry_tag`, `verify_retry`, `TAG_LEN`, `SAMPLE_LEN`, `INITIAL_SALT_V1`, `RETRY_KEY_V1`, `RETRY_NONCE_V1`
 - [Streams and flow control](#streams-and-flow-control): `StreamId`, `LocalStreams`, `RemoteStreams`, `RecvCredit`, `SendCredit`, `RecvStream`, `RecvState`, `SendStream`, `SendState`, `Chunk`, `CryptoRecv`, `MAX_FRAGMENTS`, `MAX_CRYPTO_BUFFER`
 - [Address validation](#address-validation): `Tokens`, `TokenCheck`, `MAX_TOKEN_LEN`, `Amplification`
-- [Connection](#connection) (feature `tls`): `Connection`, `Config`, `Event`, `Close`, `ConnectError`, `StreamError`, `TlsRetry`
+- [Connection](#connection) (feature `tls`): `Connection`, `Config`, `Event`, `Close`, `ConnectError`, `StreamError`, `CongestionState`, `TlsRetry`
 - [Errors](#errors): `DecodeError`, `TransportErrorCode`
 - [`VERSION`](#version)
 
@@ -161,7 +161,8 @@ Feature `tls` (on by default): a QUIC connection, sans-IO, with its handshake th
 - `Event`: `Connected`, `StreamOpened(id)`, `StreamReadable(id)`, `StreamReset { id, code }`, `StreamStopped { id, code }`, `NewToken(token)`, `Closed(Close { code, application, reason, remote })`.
 - Streams: `open_stream(bidi)`, `stream_write(id, data) -> usize`, `stream_finish(id)`, `stream_reset(id, code)`, `stream_read(id, out) -> usize` (0 when nothing is ready), `stream_is_finished(id)`, `stream_stop(id, code)`.
 - `close(now, code, reason)`, `is_established()`, `is_closed()`, `close_reason()`, `alpn()`, `peer_params()`, `rtt()`, `local_cid()`, `side()`.
-- `Config`: `params` (the transport parameters to send; the connection fills in the IDs and the reset token), `max_datagram`, `send_buffer`, `reset_key`. The default: 10 MiB of connection credit, 1 MiB per stream, 100 streams of each type, a 30-second idle timeout.
+- Congestion: `congestion_window()`, `bytes_in_flight()`, `congestion_state() -> CongestionState` (`SlowStart`, `CongestionAvoidance`, `Recovery`). NewReno (RFC 9002 section 7) with pacing; `poll_timeout` includes the pacing timer.
+- `Config`: `params` (the transport parameters to send; the connection fills in the IDs and the reset token), `max_datagram`, `send_buffer`, `reset_key`, `pacing` (on by default). The default: 10 MiB of connection credit, 1 MiB per stream, 100 streams of each type, a 30-second idle timeout.
 - `TlsRetry` computes the Retry integrity tag through tls-net, for `retry_tag` and `verify_retry`.
 
 ```rust
@@ -172,7 +173,7 @@ while conn.poll_transmit(Instant::now(), &mut out) {
 }
 ```
 
-Not yet: congestion control and pacing (0.6), 0-RTT, migration, issuing more connection IDs, initiating key updates (the peer's are followed).
+Not yet: 0-RTT, migration, issuing more connection IDs, initiating key updates (the peer's are followed).
 
 ## Errors
 

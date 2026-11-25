@@ -2,7 +2,7 @@
 
 > The design, strategy, and decision record for `quic-net`. A living document: every design decision, idea, or open question about quic-net is written here or in [`ROADMAP.md`](./ROADMAP.md) before it is acted on.
 >
-> **Status:** `0.5.0`: a working connection over everything below. `0.4.0`: the sans-IO wire layer (0.2), packet protection over key traits (0.3), and streams with flow control (0.4). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
+> **Status:** `0.6.0`: a working connection with congestion control (0.5, 0.6) over everything below. `0.4.0`: the sans-IO wire layer (0.2), packet protection over key traits (0.3), and streams with flow control (0.4). Next: the connection API and the handshake on tls-net's QUIC interface. The largest crate in the network family.
 
 ---
 
@@ -150,6 +150,19 @@ Next to the Initial packet it arrives in (an AEAD open, then TLS), a token check
 
 Not in 0.5 (roadmap 0.6): congestion control and pacing, migration and path validation, more connection IDs, initiating key updates, 0-RTT. Until congestion control lands, a sender is limited only by flow control: fine on a local network or behind a rate limit, not on a shared path.
 
+## 3f. Design of congestion control (0.6)
+
+NewReno (RFC 9002 section 7 and appendix B), in `cc.rs`, apart from the connection so it can be tested alone:
+
+- **Bytes in flight**: every packet that is ack-eliciting or padded, in any packet number space, from when it is sent until it is acknowledged, declared lost, or its keys are discarded. Packets a probe timeout re-sends leave the count without a congestion reaction: a probe timeout is not a loss (RFC 9002 section 6.2).
+- **The window**: 10 datagrams to start (within 14,720 bytes, at least 2 datagrams), doubling per round trip in slow start, one datagram per window after the first loss, halved once per recovery period (losses of packets sent before the reduction do not halve it again), at least 2 datagrams. Persistent congestion (losses spanning three probe timeouts, with an RTT sample) drops it to the minimum.
+- **What it holds back**: packets that would be in flight. ACK-only packets always go; probes and closes may pass the window (section 7.5). A datagram goes while the window has any room, so it may pass the window by less than one datagram, as is usual.
+- **Pacing** (section 7.7): 1.25 times the window per smoothed round trip, with bursts of up to ten datagrams. `poll_timeout` includes the pacing timer; `Config::pacing` turns it off.
+
+Persistent congestion is judged on one batch of losses at a time: the first and last lost packets must be more than three probe timeouts apart. The RFC also requires that nothing between them was acknowledged; a batch of losses found together has nothing acknowledged between them by construction, but losses found in separate batches are not combined, so persistent congestion may be found later than the RFC allows. That errs on the side of a larger window for one more round trip.
+
+Cost, an estimate not yet benchmarked: a few integer operations per packet sent, acknowledged, or lost, and a few floating point ones per datagram for the pacer.
+
 ## 4. Threats
 
 | Threat | Defence |
@@ -175,6 +188,7 @@ Not in 0.5 (roadmap 0.6): congestion control and pacing, migration and path vali
 | a 1-RTT packet before the client is authenticated | the server processes none until tls-net says the handshake is complete (RFC 9001 section 5.7) | none |
 | forged packets wearing down the AEAD | every packet that fails to open counts toward the integrity limit; at the limit, `AEAD_LIMIT_REACHED` | one counter |
 | a stale peer configuration on resumption | the client ignores the previous session's transport parameters and waits for the server's new ones | none |
+| a peer slowing its ACKs to make this endpoint flood a path | the window grows only on acknowledged bytes, and losses halve it; pacing spreads each window over the round trip | none beyond the bookkeeping |
 | stateless reset forgery or probing | tokens are keyed BLAKE3 of the ID under a secret key; comparisons in constant time; datagrams under 21 bytes are never resets | one BLAKE3 per issued ID; 16 XORs per token checked |
 
 ## 5. Prerequisites
@@ -270,3 +284,6 @@ Another way to the Initial keys, which need no handshake: crypt-io with AES-128-
 | D-023 | 2026-11-25 | Loss detection and the probe timeout come with 0.5; congestion control waits for 0.6 | a handshake that loses a datagram must recover, so RFC 9002's detection and PTO are needed now; congestion control is its own design (and benchmarks) |
 | D-024 | 2026-11-25 | A client keeps its PTO backoff across Initial ACKs and probes without packets in flight only until a Handshake packet of its own is acknowledged | RFC 9002 section 6.2.1 and 6.2.2.1; found by the `connection` fuzz target: with the backoff reset and the probes unconditional, a client whose server lost its flight probed every PTO (1 ms on a fast path) until the server's own timer fired |
 | D-025 | 2026-11-25 | A client applies the server's transport parameters only once its handshake is complete | on resumption rustls returns the previous session's parameters before the handshake (for 0-RTT); applying them failed the connection IDs check. Found by the `connection` fuzz target |
+| D-026 | 2026-11-25 | 0.6 is congestion control and pacing; migration, more connection IDs, initiating key updates, and 0-RTT move to 0.7 | congestion control is what a public crate needed next: without it a sender is limited only by flow control. Migration and 0-RTT are their own designs and do not change what 0.6 delivers |
+| D-027 | 2026-11-25 | NewReno, the controller RFC 9002 specifies, behind a small internal interface (sent, acknowledged, lost, discarded, persistent congestion) | it is the one the RFC describes in full, so it can be checked against the text; the interface leaves room for CUBIC or BBR later without touching the connection |
+| D-028 | 2026-11-25 | The pacer accepts a budget within one byte of a datagram and never waits less than 1 us | its refill is floating point; a timer set to the exact moment could find the budget a hair short and wait zero nanoseconds, so a caller woken at that time would spin without sending |

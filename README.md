@@ -21,7 +21,7 @@
         <strong>quic-net</strong> is the QUIC transport: encrypted, multiplexed streams over UDP, with its own loss recovery and congestion control, and connections that survive a client changing networks. It runs on the UDP socket of net-io and takes TLS 1.3 from tls-net.
     </p>
     <p>
-        It is planned for later and is the largest crate in the network family. HTTP/3 builds on it.
+        It is sans-IO: the caller owns the socket and the clock, passes datagrams in, and sends what comes out. HTTP/3 builds on it.
     </p>
     <br>
     <hr>
@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>.
     </p>
     <blockquote>
-        <strong>Status: <code>0.5.0</code>, a working connection.</strong> A client and a server handshake through tls-net and carry streams, sans-IO: the caller owns the socket and the clock. Packet headers, version negotiation, every transport frame, transport parameters, and connection IDs with stateless reset tokens, all without I/O. Header and packet protection, the Initial key schedule, the AEAD limits, and the Retry integrity tag, over key traits a TLS session implements. Streams with reassembly, flow control both ways, stream limits, loss and retransmission, and CRYPTO reassembly. Address validation tokens and the amplification limit. Congestion control, migration, and 0-RTT follow (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>).
+        <strong>Status: <code>0.6.0</code>, a working connection with congestion control.</strong> A client and a server handshake through tls-net and carry streams, paced and within a NewReno congestion window. Packet headers, version negotiation, every transport frame, transport parameters, and connection IDs with stateless reset tokens, all without I/O. Header and packet protection, the Initial key schedule, the AEAD limits, and the Retry integrity tag, over key traits a TLS session implements. Streams with reassembly, flow control both ways, stream limits, loss and retransmission, and CRYPTO reassembly. Address validation tokens and the amplification limit. Migration, more connection IDs, and 0-RTT follow (<a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>).
     </blockquote>
 </div>
 

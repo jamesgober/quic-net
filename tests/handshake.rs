@@ -392,3 +392,90 @@ fn test_the_server_keeps_to_the_amplification_limit() {
     assert!(sent > 0);
     assert!(sent <= 3 * received, "{sent} sent for {received} received");
 }
+
+#[test]
+fn test_the_window_bounds_what_is_in_flight() {
+    // A bottleneck: each round the link carries at most 8 datagrams toward
+    // the server and holds 16 more; the rest are dropped, as a full router
+    // queue drops them.
+    let mut p = Pair::new();
+    p.run(50, &mut |_| true);
+    let id = p.client.open_stream(true).unwrap();
+    let payload: Vec<u8> = (0..400_000).map(|i| (i % 253) as u8).collect();
+    let mut written = 0;
+    let mut got = Vec::new();
+    let mut server_id = None;
+    let mut queue: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+    let mut buf = Vec::new();
+    let mut read = vec![0u8; 65536];
+    let mut windows = Vec::new();
+    let mut dropped = 0;
+    for _ in 0..20_000 {
+        if written < payload.len() {
+            written += p.client.stream_write(id, &payload[written..]).unwrap();
+            if written == payload.len() {
+                p.client.stream_finish(id).unwrap();
+            }
+        }
+        while p.client.poll_transmit(p.now, &mut buf) {
+            assert!(
+                p.client.bytes_in_flight() <= p.client.congestion_window() + 1500,
+                "{} in flight for a window of {}",
+                p.client.bytes_in_flight(),
+                p.client.congestion_window()
+            );
+            if queue.len() < 16 {
+                queue.push_back(buf.clone());
+            } else {
+                dropped += 1;
+            }
+        }
+        windows.push(p.client.congestion_window());
+        for _ in 0..8 {
+            let Some(mut d) = queue.pop_front() else {
+                break;
+            };
+            p.server.handle_datagram(p.now, &mut d);
+        }
+        while p.server.poll_transmit(p.now, &mut buf) {
+            let mut d = buf.clone();
+            p.client.handle_datagram(p.now, &mut d);
+        }
+        for e in Pair::events(&mut p.server) {
+            if let Event::StreamOpened(s) = e {
+                server_id = Some(s);
+            }
+        }
+        if let Some(s) = server_id {
+            loop {
+                let n = p.server.stream_read(s, &mut read).unwrap();
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&read[..n]);
+            }
+            if p.server.stream_is_finished(s) {
+                break;
+            }
+        }
+        // Time moves 1 ms per round, and timers run.
+        p.now += Duration::from_millis(1);
+        p.client.handle_timeout(p.now);
+        p.server.handle_timeout(p.now);
+    }
+    assert!(
+        got == payload,
+        "received {} of {} bytes",
+        got.len(),
+        payload.len()
+    );
+    assert!(dropped > 0, "the bottleneck never dropped anything");
+    let peak = windows.iter().copied().max().unwrap();
+    let after_peak = windows
+        .iter()
+        .skip_while(|w| **w < peak)
+        .copied()
+        .min()
+        .unwrap();
+    assert!(after_peak < peak, "the window never shrank after a loss");
+}

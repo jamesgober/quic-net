@@ -38,10 +38,14 @@
 - [x] Tests: handshake, stream echo, lossy channels, resumption, Retry, close, amplification; fuzz target `connection`.
 - [x] Address validation tokens (Retry and `NEW_TOKEN`) and the anti-amplification limit of a path (D-018 to D-020).
 
-## v0.6.0 - Recovery and migration
-- [ ] Congestion control and pacing (loss detection and the probe timeout came with 0.5).
-- [ ] Migration and path validation; issuing more connection IDs; initiating key updates.
-- [ ] 0-RTT.
+## v0.6.0 - Congestion control (2026-11-25)
+- [x] NewReno with pacing (RFC 9002 section 7); loss detection and the probe timeout came with 0.5 (D-026 to D-028).
+- [x] A bottleneck test: the window bounds what is in flight and shrinks on loss.
+- Moved to 0.7, with the reason in PLAN D-026: migration and path validation, more connection IDs, initiating key updates, 0-RTT.
+
+## v0.7.0 - Migration
+- [ ] Migration and path validation; issuing more connection IDs; initiating key updates (moved from 0.6, D-026).
+- [ ] 0-RTT (moved from 0.6, D-026).
 
 ## v1.0.0 - Stable
 - [ ] Frozen after an HTTP/3 engine has used it end to end.
